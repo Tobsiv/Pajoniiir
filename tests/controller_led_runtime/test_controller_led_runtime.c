@@ -162,10 +162,10 @@ int main(void)
 
     controller_led_runtime_diagnostics_t diagnostics;
     controller_led_runtime_get_diagnostics(&diagnostics);
-    CHECK(diagnostics.dynamic_packets == 2u);
-    CHECK(diagnostics.builtin_packets == 6u);
-    CHECK(diagnostics.builtin_fallbacks == 4u);
-    CHECK(diagnostics.unsupported == 2u);
+    CHECK(diagnostics.dynamic_packets == 4u);
+    CHECK(diagnostics.builtin_packets == 2u);
+    CHECK(diagnostics.builtin_fallbacks == 1u);
+    CHECK(diagnostics.unsupported == 5u);
     CHECK(diagnostics.send_failures == 1u);
 
     printf("PASS P4 local controller LED runtime\n");

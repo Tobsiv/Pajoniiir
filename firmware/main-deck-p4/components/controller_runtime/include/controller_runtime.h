@@ -18,6 +18,8 @@ typedef esp_err_t (*controller_runtime_event_cb_t)(
 typedef struct {
     controller_runtime_event_cb_t event_cb;
     void *callback_ctx;
+    /* Retry connection edges through event_cb; preserve disconnect before replug. */
+    bool publish_connection_events;
 } controller_runtime_config_t;
 
 typedef struct {

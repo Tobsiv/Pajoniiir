@@ -14,3 +14,9 @@ set(EXTRA_COMPONENT_DIRS
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(p4-only-software-harness)
+
+# Exercise the same pinned USB driver transforms as the production image.
+# usb_host_manager requires the indexed idle-only recovery API added here.
+include("${CMAKE_CURRENT_LIST_DIR}/../main-deck-p4/cmake/apply_espressif_usb_fifo_patch.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../main-deck-p4/cmake/apply_espressif_usb_idle_recovery_patch.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../main-deck-p4/cmake/apply_usb_host_msc_teardown_patch.cmake")

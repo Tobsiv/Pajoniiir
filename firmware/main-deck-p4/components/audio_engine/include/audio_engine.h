@@ -231,6 +231,8 @@ typedef struct {
     uint32_t usb_headphone_ring_high_water_frames;
     uint32_t usb_headphone_overflow_frames;
     uint32_t usb_headphone_underflow_frames;
+    uint32_t usb_headphone_packet_failures;
+    uint32_t usb_headphone_packet_lost_frames;
     uint32_t usb_headphone_active_data_loss_flags;
     uint32_t heap_free;
     uint32_t internal_free;

@@ -57,6 +57,8 @@ static void health_monitor_cb(void *arg)
     static uint32_t pending_uac_dropped = 0u;
     static uint32_t pending_uac_overflow = 0u;
     static uint32_t pending_uac_underflow = 0u;
+    static uint32_t pending_uac_packet_loss = 0u;
+    static int64_t uac_packet_report_us = 0;
     static int64_t uac_data_report_us = 0;
     static int64_t uac_pressure_report_us = 0;
 
@@ -83,8 +85,19 @@ static void health_monitor_cb(void *arg)
         d.usb_headphone_ring_capacity_frames,
         d.usb_headphone_dropped_blocks,
         d.usb_headphone_overflow_frames,
-        d.usb_headphone_underflow_frames);
+        d.usb_headphone_underflow_frames,
+        d.usb_headphone_packet_lost_frames);
     audio_engine_set_uac_active_data_loss_flags(uac.active_data_loss_flags);
+    pending_uac_packet_loss = add_u32_saturating(
+        pending_uac_packet_loss, uac.delta_packet_lost_frames);
+    if (pending_uac_packet_loss > 0u &&
+        (uac_packet_report_us == 0 || (now_us - uac_packet_report_us) >= QUIET_US)) {
+        service_log_event(SERVICE_LOG_UAC_DATA_LOSS, SERVICE_LOG_WARN,
+                          4u, pending_uac_packet_loss,
+                          d.usb_headphone_packet_failures, 0u, 0u, "USB packet loss");
+        pending_uac_packet_loss = 0u;
+        uac_packet_report_us = now_us;
+    }
     pending_uac_dropped = add_u32_saturating(
         pending_uac_dropped, uac.delta_dropped_blocks);
     pending_uac_overflow = add_u32_saturating(

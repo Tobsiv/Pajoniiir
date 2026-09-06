@@ -7,6 +7,14 @@
 #include "controller_profile.h"
 #include "controller_profile_runtime.h"
 
+#ifdef ESP_PLATFORM
+#include "freertos/semphr.h"
+static SemaphoreHandle_t s_runtime_mutex;
+#else
+#include <pthread.h>
+static pthread_mutex_t s_runtime_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
 static controller_runtime_config_t s_config;
 static flx4_map_state_t s_map;
 static controller_event_buffer_t s_buffer;
@@ -18,10 +26,13 @@ static size_t s_snapshot_cursor;
 static control_held_state_reconciler_t s_held_states;
 static bool s_initialized;
 static bool s_connected;
+static uint32_t s_connection_generation;
+static uint32_t s_connection_acknowledged;
+static bool s_disconnect_pending;
+static uint32_t s_disconnect_generation;
 static bool s_builtin_flx4_enabled;
 static bool s_snapshot_pending;
 static bool s_retry_pending;
-static bool s_locked;
 static bool s_dispatch_locked;
 static uint32_t s_midi_messages;
 static uint32_t s_mapped_messages;
@@ -33,15 +44,20 @@ static uint32_t s_dispatch_calls;
 
 static void runtime_lock(void)
 {
-    while (__atomic_test_and_set(&s_locked, __ATOMIC_ACQUIRE)) {
-        /* Runtime APIs are task-context only; the protected sections are
-         * bounded memory operations and never invoke application callbacks. */
-    }
+#ifdef ESP_PLATFORM
+    if (s_runtime_mutex) xSemaphoreTake(s_runtime_mutex, portMAX_DELAY);
+#else
+    pthread_mutex_lock(&s_runtime_mutex);
+#endif
 }
 
 static void runtime_unlock(void)
 {
-    __atomic_clear(&s_locked, __ATOMIC_RELEASE);
+#ifdef ESP_PLATFORM
+    if (s_runtime_mutex) xSemaphoreGive(s_runtime_mutex);
+#else
+    pthread_mutex_unlock(&s_runtime_mutex);
+#endif
 }
 
 typedef struct {
@@ -135,6 +151,13 @@ esp_err_t controller_runtime_init(const controller_runtime_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
+#ifdef ESP_PLATFORM
+    /* Bootstrap is the sole initializer, before USB/dispatch admission.
+     * A mutex lets preempted owners inherit the waiting USB task's priority. */
+    if (!s_runtime_mutex) s_runtime_mutex = xSemaphoreCreateMutex();
+    if (!s_runtime_mutex) return ESP_ERR_NO_MEM;
+#endif
+
     runtime_lock();
     s_config = *config;
     flx4_map_init(&s_map);
@@ -142,6 +165,10 @@ esp_err_t controller_runtime_init(const controller_runtime_config_t *config)
     controller_event_buffer_init(&s_buffer);
     control_held_state_reset(&s_held_states);
     s_connected = false;
+    s_connection_generation = 0u;
+    s_connection_acknowledged = 0u;
+    s_disconnect_pending = false;
+    s_disconnect_generation = 0u;
     __atomic_store_n(&s_builtin_flx4_enabled, false, __ATOMIC_RELEASE);
     s_snapshot_pending = false;
     s_retry_pending = false;
@@ -215,10 +242,13 @@ void controller_runtime_set_connected(bool connected)
     runtime_lock();
     const bool was_connected = s_connected;
     s_connected = connected;
+    if (connected != was_connected) s_connection_generation++;
     if (connected && !was_connected) {
         invalidate_held_schedule_locked();
         s_snapshot_pending = true;
     } else if (!connected && was_connected) {
+        s_disconnect_pending = true;
+        s_disconnect_generation = s_connection_generation;
         control_held_state_release_all(&s_held_states, 0u);
     }
     runtime_unlock();
@@ -249,8 +279,44 @@ size_t controller_runtime_dispatch_pending(size_t max_events)
         bool have_retry = false;
         bool have_snapshot = false;
         bool have_buffered = false;
+        uint32_t connection_generation = 0u;
+        bool have_connection = false;
+        uint32_t disconnect_generation = 0u;
+        bool have_disconnect = false;
+        bool captured_connected = false;
 
         runtime_lock();
+        if (s_config.publish_connection_events &&
+            (s_disconnect_pending || s_connection_generation != s_connection_acknowledged)) {
+            connection_generation = s_connection_generation;
+            disconnect_generation = s_disconnect_generation;
+            have_disconnect = s_disconnect_pending;
+            captured_connected = s_connected;
+            have_connection = true;
+            event = (flx4_control_event_t) {
+                .type = CTRL_TYPE_STATE, .id = CTRL_ID_FLX4_CONNECTION,
+                .value = !have_disconnect && captured_connected
+                    ? CTRL_FLX4_CONNECTED : CTRL_FLX4_DISCONNECTED,
+            };
+        }
+        if (have_connection) {
+            runtime_unlock();
+            if (s_config.event_cb(&event, s_config.callback_ctx) != ESP_OK) break;
+            runtime_lock();
+            /* A disconnect must release platters/loop adjustment even when a
+             * reconnect arrives before queue space returns. Deliver it first,
+             * then the latest connected state; never acknowledge a newer edge. */
+            if (have_disconnect && s_disconnect_generation == disconnect_generation) {
+                s_disconnect_pending = false;
+            }
+            if (!have_disconnect || !captured_connected) {
+                s_connection_acknowledged = connection_generation;
+            }
+            runtime_unlock();
+            __atomic_add_fetch(&s_semantic_events, 1u, __ATOMIC_RELAXED);
+            dispatched++;
+            continue;
+        }
         prepare_snapshot_if_possible_locked();
 
         size_t cursor = 0u;
@@ -388,6 +454,9 @@ size_t controller_runtime_pending_count(void)
     const size_t pending = s_buffer.count + held_dirty_count_locked() +
                            (s_snapshot_count - s_snapshot_cursor) +
                            (s_retry_pending ? 1u : 0u) +
+                           (s_config.publish_connection_events &&
+                            (s_disconnect_pending ||
+                             s_connection_generation != s_connection_acknowledged) ? 1u : 0u) +
                            (s_snapshot_pending ? 1u : 0u);
     runtime_unlock();
     return pending;

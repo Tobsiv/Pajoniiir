@@ -14,7 +14,7 @@ $Reconciler = Join-Path $RepoRoot "firmware/common/control_state_reconciler/incl
 $Stubs = Join-Path $PSScriptRoot "stubs"
 
 $CommonArgs = @(
-    "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+    "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-Werror", "-pthread",
     "-I$(Join-Path $Runtime 'include')",
     "-I$(Join-Path $Codec 'include')",
     "-I$(Join-Path $Profile 'include')",
@@ -94,6 +94,14 @@ gcc @CommonArgs `
     -o $TopologyExe
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $TopologyExe
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+$MutexExe = Join-Path $BuildDir "test_controller_runtime_mutex"
+if ($env:OS -eq "Windows_NT") { $MutexExe += ".exe" }
+gcc @CommonArgs -DCONTROLLER_PROFILE_RUNTIME_PC_TEST -DESP_PLATFORM `
+    @RuntimeSources (Join-Path $PSScriptRoot "test_controller_runtime_mutex.c") -o $MutexExe
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $MutexExe
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 exit 0

@@ -1482,7 +1482,7 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         "\"ring_queued_frames\":%u,\"ring_capacity_frames\":%u,\"ring_high_water_frames\":%u,"
         "\"ring_low_alarm_frames\":%u,\"ring_high_alarm_frames\":%u,\"ring_state\":\"%s\","
         "\"overflow_frames\":%u,\"underflow_frames\":%u,\"data_loss\":%s,"
-        "\"data_loss_flags\":%u},"
+        "\"data_loss_flags\":%u,\"packet_failures\":%u,\"packet_lost_frames\":%u},"
         "%s,"
         "\"heap_free\":%u,"
         "\"internal_free\":%u,"
@@ -1562,6 +1562,8 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         (unsigned)diagnostics.usb_headphone_underflow_frames,
         uac_data_loss ? "true" : "false",
         (unsigned)uac_data_loss_flags,
+        (unsigned)diagnostics.usb_headphone_packet_failures,
+        (unsigned)diagnostics.usb_headphone_packet_lost_frames,
         beat_fx_echo_diag_json,
         (unsigned)diagnostics.heap_free,
         (unsigned)diagnostics.internal_free,

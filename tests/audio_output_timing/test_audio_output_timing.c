@@ -37,6 +37,13 @@ static void test_slow_blocks_force_an_idle_tick_by_elapsed_time(void)
 
 int main(void)
 {
+    assert(audio_output_select_sample_rate(0u) == 0u);
+    assert(audio_output_select_sample_rate(8000u) == 44100u);
+    assert(audio_output_select_sample_rate(22050u) == 44100u);
+    assert(audio_output_select_sample_rate(32000u) == 44100u);
+    assert(audio_output_select_sample_rate(44100u) == 44100u);
+    assert(audio_output_select_sample_rate(48000u) == 48000u);
+    assert(audio_output_select_sample_rate(96000u) == 48000u);
     test_block_period_us_uses_precise_ceil_division();
     test_late_warning_threshold_allows_codec_write_pacing_slack();
     test_continuous_output_periodically_forces_an_idle_tick();

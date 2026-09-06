@@ -10,6 +10,7 @@ typedef enum {
     AUDIO_UAC_HEALTH_DROPPED       = 1u << 2,
     AUDIO_UAC_HEALTH_OVERFLOW      = 1u << 3,
     AUDIO_UAC_HEALTH_UNDERFLOW     = 1u << 4,
+    AUDIO_UAC_HEALTH_PACKET_LOSS   = 1u << 5,
 } audio_uac_health_flags_t;
 
 typedef enum {
@@ -26,6 +27,7 @@ typedef struct {
     uint32_t last_dropped_blocks;
     uint32_t last_overflow_frames;
     uint32_t last_underflow_frames;
+    uint32_t last_packet_lost_frames;
     uint32_t active_data_loss_flags;
 } audio_uac_health_monitor_t;
 
@@ -36,6 +38,7 @@ typedef struct {
     uint32_t delta_dropped_blocks;
     uint32_t delta_overflow_frames;
     uint32_t delta_underflow_frames;
+    uint32_t delta_packet_lost_frames;
     uint32_t active_data_loss_flags;
 } audio_uac_health_result_t;
 
@@ -55,4 +58,5 @@ audio_uac_health_result_t audio_uac_health_sample(
     uint32_t capacity_frames,
     uint32_t dropped_blocks,
     uint32_t overflow_frames,
-    uint32_t underflow_frames);
+    uint32_t underflow_frames,
+    uint32_t packet_lost_frames);

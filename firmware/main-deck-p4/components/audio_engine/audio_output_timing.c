@@ -1,5 +1,10 @@
 #include "audio_output_timing.h"
 
+uint32_t audio_output_select_sample_rate(uint32_t source_rate)
+{
+    return source_rate == 0u ? 0u : (source_rate > 44100u ? 48000u : 44100u);
+}
+
 uint32_t audio_output_block_period_us(uint32_t sample_rate)
 {
     if (sample_rate == 0u) return 0u;

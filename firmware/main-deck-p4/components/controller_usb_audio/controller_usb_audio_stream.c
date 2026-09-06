@@ -42,12 +42,27 @@ static bool s_stopping;
 static bool s_device_gone;
 static bool s_flush_attempted;
 static bool s_faulted;
-static bool s_accepting;
+/* Admission and in-flight ownership share one atomic word. Cleanup never waits
+ * at USB priority for the lower-priority output owner; it polls on later turns. */
+#define WRITE_ACCEPTING 1u
+#define WRITE_ACTIVE 2u
+static uint32_t s_write_gate;
+static void set_accepting(bool accepting)
+{
+    if (accepting) __atomic_fetch_or(&s_write_gate, WRITE_ACCEPTING, __ATOMIC_RELEASE);
+    else __atomic_fetch_and(&s_write_gate, ~WRITE_ACCEPTING, __ATOMIC_ACQ_REL);
+}
+static void finish_write(void)
+{
+    __atomic_fetch_and(&s_write_gate, ~WRITE_ACTIVE, __ATOMIC_RELEASE);
+}
 static uint64_t s_submitted_blocks;
 static uint64_t s_dropped_blocks;
 static uint64_t s_submitted_frames;
 static uint32_t s_config_failures;
 static uint32_t s_transfer_failures;
+static uint32_t s_packet_failures;
+static uint64_t s_packet_lost_frames;
 
 static void lower_to_transition_priority(void)
 {
@@ -118,7 +133,7 @@ static bool has_active_isoc(void)
 static void mark_fault(bool configuration_failure)
 {
     s_faulted = true;
-    __atomic_store_n(&s_accepting, false, __ATOMIC_RELEASE);
+    set_accepting(false);
     s_streaming = false;
     s_configuring = false;
     s_stopping = true;
@@ -179,7 +194,7 @@ static void isoc_callback(usb_transfer_t *transfer)
         s_device_gone = s_device_gone ||
                         transfer->status == USB_TRANSFER_STATUS_NO_DEVICE;
         s_stopping = true;
-        __atomic_store_n(&s_accepting, false, __ATOMIC_RELEASE);
+        set_accepting(false);
         s_streaming = false;
         lower_to_transition_priority();
         return;
@@ -188,6 +203,24 @@ static void isoc_callback(usb_transfer_t *transfer)
         ESP_LOGW(TAG, "isochronous status=%d", (int)transfer->status);
         mark_fault(false);
         return;
+    }
+    /* HCD reports a completed URB even if individual ISO packets were skipped
+     * or failed. Count loss before prepare_and_submit overwrites descriptors.
+     * Isolated loss does not restart USB; terminal URB faults retain the bounded
+     * recovery policy above. */
+    for (int i = 0; i < transfer->num_isoc_packets; ++i) {
+        const int wanted = transfer->isoc_packet_desc[i].num_bytes;
+        const int actual = transfer->isoc_packet_desc[i].actual_num_bytes;
+        const bool completed = transfer->isoc_packet_desc[i].status ==
+                               USB_TRANSFER_STATUS_COMPLETED;
+        if (!completed || actual != wanted) {
+            __atomic_add_fetch(&s_packet_failures, 1u, __ATOMIC_RELAXED);
+            const unsigned missing = !completed || actual < 0 || actual > wanted
+                ? (unsigned)wanted : (unsigned)(wanted - actual);
+            __atomic_add_fetch(&s_packet_lost_frames,
+                (missing + STREAM_CHANNELS * STREAM_BYTES_PER_SAMPLE - 1u) /
+                    (STREAM_CHANNELS * STREAM_BYTES_PER_SAMPLE), __ATOMIC_RELAXED);
+        }
     }
     if (!s_stopping) {
         const esp_err_t rc = prepare_and_submit(transfer);
@@ -247,7 +280,7 @@ static void control_callback(usb_transfer_t *transfer)
         s_device_gone = s_device_gone ||
                         transfer->status == USB_TRANSFER_STATUS_NO_DEVICE;
         s_stopping = true;
-        __atomic_store_n(&s_accepting, false, __ATOMIC_RELEASE);
+        set_accepting(false);
         s_configuring = false;
         lower_to_transition_priority();
         return;
@@ -294,7 +327,7 @@ static void control_callback(usb_transfer_t *transfer)
     s_control_step = 0u;
     s_configuring = false;
     s_streaming = true;
-    __atomic_store_n(&s_accepting, true, __ATOMIC_RELEASE);
+    set_accepting(true);
     if (s_owner_task && s_active_priority > 0u) {
         vTaskPrioritySet(s_owner_task, s_active_priority);
     }
@@ -338,7 +371,7 @@ esp_err_t controller_usb_audio_stream_start(
     s_stopping = false;
     s_configuring = true;
     s_streaming = false;
-    __atomic_store_n(&s_accepting, false, __ATOMIC_RELEASE);
+    set_accepting(false);
     s_control_step = 0u;
     memset(s_isoc_active, 0, sizeof(s_isoc_active));
     memset(&s_resampler, 0, sizeof(s_resampler));
@@ -384,7 +417,7 @@ esp_err_t controller_usb_audio_stream_start(
 
 void controller_usb_audio_stream_request_stop(bool device_gone)
 {
-    __atomic_store_n(&s_accepting, false, __ATOMIC_RELEASE);
+    set_accepting(false);
     s_streaming = false;
     s_configuring = false;
     s_stopping = s_claimed || s_control || s_control_active;
@@ -413,7 +446,8 @@ bool controller_usb_audio_stream_poll_cleanup(void)
             ESP_LOGW(TAG, "UAC endpoint halt: %s", esp_err_to_name(halt_rc));
         }
     }
-    if (s_control_active || has_active_isoc()) {
+    if (s_control_active || has_active_isoc() ||
+        (__atomic_load_n(&s_write_gate, __ATOMIC_ACQUIRE) & WRITE_ACTIVE)) {
         return false;
     }
 
@@ -460,7 +494,8 @@ bool controller_usb_audio_stream_poll_cleanup(void)
 bool controller_usb_audio_stream_is_quiesced(void)
 {
     return !s_claimed && !s_control && !s_control_active &&
-           !has_active_isoc();
+           !has_active_isoc() &&
+           __atomic_load_n(&s_write_gate, __ATOMIC_ACQUIRE) == 0u;
 }
 
 esp_err_t controller_usb_audio_stream_write(const int16_t *master_samples,
@@ -472,7 +507,10 @@ esp_err_t controller_usb_audio_stream_write(const int16_t *master_samples,
         source_sample_rate < STREAM_RATE_HZ || source_sample_rate > 48000u) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (!__atomic_load_n(&s_accepting, __ATOMIC_ACQUIRE)) {
+    uint32_t expected_gate = WRITE_ACCEPTING;
+    if (!__atomic_compare_exchange_n(&s_write_gate, &expected_gate,
+            WRITE_ACCEPTING | WRITE_ACTIVE, false,
+            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return ESP_ERR_INVALID_STATE;
     }
     if (s_resampler.source_rate != source_sample_rate ||
@@ -481,6 +519,7 @@ esp_err_t controller_usb_audio_stream_write(const int16_t *master_samples,
         if (!controller_audio_resampler_init(&s_resampler, source_sample_rate,
                                              STREAM_RATE_HZ,
                                              STREAM_CHANNELS)) {
+            finish_write();
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -526,6 +565,7 @@ esp_err_t controller_usb_audio_stream_write(const int16_t *master_samples,
         __atomic_add_fetch(&s_dropped_blocks, 1u, __ATOMIC_RELAXED);
     }
     __atomic_add_fetch(&s_submitted_blocks, 1u, __ATOMIC_RELAXED);
+    finish_write();
     return ESP_OK;
 }
 
@@ -553,6 +593,8 @@ void controller_usb_audio_stream_get_stats(
     portEXIT_CRITICAL(&s_mux);
     out_stats->config_failures = s_config_failures;
     out_stats->transfer_failures = s_transfer_failures;
+    out_stats->packet_failures = __atomic_load_n(&s_packet_failures, __ATOMIC_RELAXED);
+    out_stats->packet_lost_frames = __atomic_load_n(&s_packet_lost_frames, __ATOMIC_RELAXED);
     out_stats->claimed = s_claimed;
     out_stats->configuring = s_configuring;
     out_stats->streaming = s_streaming;

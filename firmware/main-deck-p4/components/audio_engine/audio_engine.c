@@ -1384,7 +1384,7 @@ static void complete_eof_drain_if_ready(uint8_t deck)
     /* EOF belongs to the producer; natural completion belongs to the consumer.
      * Re-check after taking the engine lock so a seek cannot be mistaken for a
      * drained track while the decision is being committed. */
-    AE_LOCK();
+    if (!AE_TRY_LOCK()) return;
     snapshot.decoder_eof = atomic_load_bool(&eng->eof);
     snapshot.playback_finished = atomic_load_bool(&eng->playback_finished);
     snapshot.playing = atomic_load_bool(&eng->playing);
@@ -2752,10 +2752,9 @@ static void ae_decode_task(void *arg)
         goto cleanup;
     }
 
-    /* The I2S/codec output path targets 44.1/48 kHz; hi-res sources (96/192 kHz
-     * FLAC) are downsampled by the per-deck output resampler, so the codec opens
-     * at a supported rate while the deck keeps its native source rate. */
-    uint32_t codec_rate = eng->sample_rate > 48000u ? 48000u : eng->sample_rate;
+    /* Both I2S and UAC use 44.1/48 kHz. The per-deck resampler converts low-rate
+     * and hi-res sources while the deck keeps its native source rate. */
+    uint32_t codec_rate = audio_output_select_sample_rate(eng->sample_rate);
     if (audio_output_service_open_codec(codec_rate) != ESP_OK) {
         ESP_LOGE(TAG, "esp_codec_dev_open(%u Hz) failed", (unsigned)codec_rate);
         ae_fail_load(eng, fw, runtime, ESP_FAIL, "CODEC OPEN ERR");
@@ -3374,8 +3373,13 @@ static void ae_output_task(void *arg)
          * frozen capture); tear the scratch state down here in that case. */
         ae_wdt_trace(AUDIO_WDT_PHASE_SCRATCH_CONTROL, 0u);
         for (uint8_t d = 0; d < AUDIO_ENGINE_DECK_COUNT; d++) {
-            if (__atomic_exchange_n(&s_scratch_abort_seek_requested[d], false,
-                                    __ATOMIC_ACQ_REL)) {
+            if (atomic_load_bool(&s_scratch_abort_seek_requested[d])) {
+                /* Leave the mailbox pending while decode owns the metadata
+                 * mutex. The recursive seek publisher below cannot block once
+                 * this task has acquired it without waiting. */
+                if (!AE_TRY_LOCK()) continue;
+                (void)__atomic_exchange_n(&s_scratch_abort_seek_requested[d], false,
+                                          __ATOMIC_ACQ_REL);
                 uint32_t target = __atomic_load_n(&s_scratch_abort_seek_target_ms[d],
                                                   __ATOMIC_ACQUIRE);
                 /* External transport wins over scratch. Teardown runs here, on
@@ -3394,6 +3398,7 @@ static void ae_output_task(void *arg)
                 }
                 s_scratch_handoff_applied[d] = __atomic_load_n(
                     &s_scratch_handoff_command[d], __ATOMIC_ACQUIRE);
+                AE_UNLOCK();
                 continue; /* external transport has priority over a re-grab */
             }
             scratch_handoff_apply_pending_command(d);
@@ -3880,6 +3885,14 @@ static void audio_engine_reset_state(audio_engine_state_t *eng, esp_err_t err, c
 
 static esp_err_t audio_engine_stop_for_deck(uint8_t deck);
 
+#if AE_FW
+static bool audio_wait_worker_exit(void *ctx)
+{
+    SemaphoreHandle_t done = (SemaphoreHandle_t)ctx;
+    return done && xSemaphoreTake(done, pdMS_TO_TICKS(1500)) == pdTRUE;
+}
+#endif
+
 /* ── audio_engine_init ────────────────────────────────────────────────────── */
 esp_err_t audio_engine_init(void)
 {
@@ -4178,16 +4191,12 @@ static esp_err_t audio_engine_load_for_deck(uint8_t deck,
         eng->loading = false;
         eng->load_progress = 100;
         audio_fw_runtime_invalidate_session(runtime);
-        int exited = 0;
-        for (int i = 0; i < runtime->tasks_started; i++) {
-            if (xSemaphoreTake(s_tasks_done[deck], pdMS_TO_TICKS(1500)) == pdTRUE) {
-                exited++;
-            }
-        }
+        const bool joined = audio_fw_runtime_join(
+            runtime, audio_wait_worker_exit, s_tasks_done[deck]);
         /* Only reclaim the PSRAM buffer once every task that could still be
          * reading it (the loader's fread target) has actually exited; freeing
          * it under a stuck loader would be a use-after-free. */
-        if (exited == runtime->tasks_started) {
+        if (joined) {
             if (fw->source) {
                 media_io_gate_begin();
                 fclose((FILE *)fw->source);
@@ -4198,9 +4207,13 @@ static esp_err_t audio_engine_load_for_deck(uint8_t deck,
                 heap_caps_free(fw->buf);
                 fw->buf = NULL;
             }
-        } else if (exited != runtime->tasks_started) {
-            ESP_LOGE(TAG, "load abort: %d/%d tasks exited; leaking preload buffer",
-                     exited, runtime->tasks_started);
+        } else {
+            /* Workers still own eng/fw/ctx. A later STOP must finish joining
+             * them before any reset, free or new LOAD can reuse this session. */
+            atomic_store_bool(&eng->playing, false);
+            ESP_LOGE(TAG, "load abort: %d workers still owned; teardown pending",
+                     runtime->tasks_started);
+            return output_rc;
         }
         audio_engine_reset_state(eng, output_rc, "OUTPUT TASK ERR");
         audio_fw_runtime_mark_stopped(runtime);
@@ -4213,11 +4226,13 @@ static esp_err_t audio_engine_load_for_deck(uint8_t deck,
         eng->loading = false;
         eng->load_progress = 100;
         audio_fw_runtime_invalidate_session(runtime);
-        int exited = 0;
-        for (int i = 0; i < runtime->tasks_started; i++) {
-            if (xSemaphoreTake(s_tasks_done[deck], pdMS_TO_TICKS(1500)) == pdTRUE) {
-                exited++;
-            }
+        const bool joined = audio_fw_runtime_join(
+            runtime, audio_wait_worker_exit, s_tasks_done[deck]);
+        if (!joined) {
+            atomic_store_bool(&eng->playing, false);
+            ESP_LOGE(TAG, "load abort: %d workers still owned; teardown pending",
+                     runtime->tasks_started);
+            return ESP_ERR_NO_MEM;
         }
         if (runtime->codec_open) {
             if (s_codec) esp_codec_dev_close(s_codec);
@@ -4225,7 +4240,7 @@ static esp_err_t audio_engine_load_for_deck(uint8_t deck,
         }
         /* Same rule as the OUTPUT TASK ERR path: never free the buffer while a
          * task that reads it might still be alive. */
-        if (exited == runtime->tasks_started) {
+        if (joined) {
             if (fw->source) {
                 media_io_gate_begin();
                 fclose((FILE *)fw->source);
@@ -4236,9 +4251,6 @@ static esp_err_t audio_engine_load_for_deck(uint8_t deck,
                 heap_caps_free(fw->buf);
                 fw->buf = NULL;
             }
-        } else if (exited != runtime->tasks_started) {
-            ESP_LOGE(TAG, "load abort: %d/%d tasks exited; leaking preload buffer",
-                     exited, runtime->tasks_started);
         }
         audio_engine_reset_state(eng, ESP_ERR_NO_MEM, "TASK CREATE ERR");
         audio_fw_runtime_mark_stopped(runtime);
@@ -4326,18 +4338,11 @@ static esp_err_t audio_engine_stop_for_deck(uint8_t deck)
     if (runtime->run || runtime->tasks_started > 0) {
         audio_fw_runtime_invalidate_session(runtime);
         atomic_store_bool(&eng->eof, false); /* wake decode task if parked at EOF */
-        if (s_tasks_done[deck]) {
-            int exited = 0;
-            for (int i = 0; i < runtime->tasks_started; i++) {
-                if (xSemaphoreTake(s_tasks_done[deck], pdMS_TO_TICKS(1500)) == pdTRUE) {
-                    exited++;
-                }
-            }
-            if (exited != runtime->tasks_started) {
-                ESP_LOGE(TAG, "audio stop timed out waiting for tasks (%d/%d exited)",
-                         exited, runtime->tasks_started);
-                return ESP_ERR_TIMEOUT;
-            }
+        if (!audio_fw_runtime_join(runtime, audio_wait_worker_exit,
+                                    s_tasks_done[deck])) {
+            ESP_LOGE(TAG, "audio stop timed out: %d workers still owned",
+                     runtime->tasks_started);
+            return ESP_ERR_TIMEOUT;
         }
         runtime->loader_task = NULL;
         runtime->decode_task = NULL;
@@ -5934,6 +5939,8 @@ void audio_engine_get_diagnostics_snapshot(audio_engine_diagnostics_snapshot_t *
 #if AE_FW
     controller_usb_host_audio_stats_t direct_stats = { 0 };
     controller_usb_host_get_audio_stats(&direct_stats);
+    out_snapshot->usb_headphone_packet_failures = direct_stats.packet_failures;
+    out_snapshot->usb_headphone_packet_lost_frames = (uint32_t)direct_stats.packet_lost_frames;
     if (direct_stats.streaming || direct_stats.submitted_blocks != 0u) {
         out_snapshot->usb_headphone_submitted_blocks =
             (uint32_t)direct_stats.submitted_blocks;

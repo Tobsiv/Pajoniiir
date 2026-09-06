@@ -2945,6 +2945,18 @@ Assert-FileContains `
     -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/audio_recorder/audio_recorder.c") `
     -LiteralPatterns @("checkpoint failed", "finalize failed; .part retained", "return s_last_error", "audio_recorder_sink_abort")
 
+# Run the controller suites here as well as in the dedicated dual-USB CI job.
+if (-not $pythonSource) { throw "Python is required for firmware lifecycle regression" }
+Invoke-Step -Name "run firmware lifecycle regression" -WorkingDirectory $RepoRoot `
+    -Executable $pythonSource -Arguments @("tests/audio_fw_runtime/test_firmware_lifecycle.py")
+
+# Resolve the current PowerShell executable for both Windows PowerShell and pwsh.
+$HostShell = (Get-Process -Id $PID).Path
+foreach ($suite in @("controller_runtime", "controller_usb_host", "controller_led_runtime")) {
+    Invoke-Step -Name "run $suite" -WorkingDirectory $RepoRoot -Executable $HostShell `
+        -Arguments @("-NoProfile", "-File", (Join-Path $PSScriptRoot "$suite/run_tests.ps1"))
+}
+
 # Windows PowerShell propagates $LASTEXITCODE as the script's exit status, so a
 # script that ends after any native command inherits that command's code even
 # when every check passed. Reaching here means nothing threw.

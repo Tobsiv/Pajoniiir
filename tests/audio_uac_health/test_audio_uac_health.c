@@ -12,7 +12,7 @@ static audio_uac_health_result_t sample(audio_uac_health_monitor_t *monitor,
                                         uint32_t underflow)
 {
     return audio_uac_health_sample(monitor, active, submitted, queued, 2048u,
-                                   dropped, overflow, underflow);
+                                   dropped, overflow, underflow, 0u);
 }
 
 static void test_ring_thresholds_and_states(void)
@@ -86,6 +86,17 @@ static void test_counter_reset_does_not_wrap(void)
 
 int main(void)
 {
+    audio_uac_health_monitor_t packets = {0};
+    audio_uac_health_result_t p = audio_uac_health_sample(
+        &packets, true, 1, 1024, 2048, 0, 0, 0, 100);
+    assert(p.flags == 0); /* Earlier idle USB losses establish a baseline. */
+    p = audio_uac_health_sample(&packets, true, 2, 1024, 2048, 0, 0, 0, 190);
+    assert(p.flags == AUDIO_UAC_HEALTH_PACKET_LOSS);
+    assert(p.delta_packet_lost_frames == 90);
+    p = audio_uac_health_sample(&packets, true, 3, 1024, 2048, 0, 0, 0, 190);
+    assert(p.flags == 0 && p.active_data_loss_flags == AUDIO_UAC_HEALTH_PACKET_LOSS);
+    p = audio_uac_health_sample(&packets, false, 3, 1024, 2048, 0, 0, 0, 200);
+    assert(p.flags == 0 && p.active_data_loss_flags == 0 && p.delta_packet_lost_frames == 0);
     test_ring_thresholds_and_states();
     test_pressure_and_active_data_loss();
     test_idle_and_playback_start_establish_baseline();

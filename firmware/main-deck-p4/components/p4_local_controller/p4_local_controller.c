@@ -30,7 +30,6 @@ static TaskHandle_t s_bootstrap_task;
 static TaskHandle_t s_profile_task;
 static QueueHandle_t s_profile_queue;
 static atomic_bool s_local_connected;
-static atomic_bool s_semantic_connected;
 static atomic_bool s_bootstrap_started;
 static atomic_bool s_bootstrap_ready;
 static atomic_uint_fast32_t s_connection_epoch;
@@ -92,24 +91,9 @@ static esp_err_t local_led_sink(uint8_t led, uint8_t state, uint8_t deck,
     return controller_led_runtime_send(led, state, deck);
 }
 
-static void publish_local_connection_state(bool connected)
-{
-    if (control_link_inject_semantic(
-            CTRL_TYPE_STATE, CTRL_ID_FLX4_CONNECTION,
-            connected ? CTRL_FLX4_CONNECTED : CTRL_FLX4_DISCONNECTED) !=
-        ESP_OK) {
-        count_inc(&s_local_queue_failures);
-    }
-}
-
 static void set_semantic_connection(bool connected)
 {
-    const bool was_connected = atomic_exchange_explicit(
-        &s_semantic_connected, connected, memory_order_acq_rel);
-    if (was_connected == connected) {
-        return;
-    }
-    publish_local_connection_state(connected);
+    /* Runtime owns deduplication and durable delivery under the same mutex. */
     controller_runtime_set_connected(connected);
 }
 
@@ -255,6 +239,7 @@ static void local_bootstrap_task(void *arg)
     const controller_runtime_config_t runtime_config = {
         .event_cb = local_semantic_callback,
         .callback_ctx = NULL,
+        .publish_connection_events = true,
     };
     esp_err_t rc = controller_runtime_init(&runtime_config);
     if (rc != ESP_OK) {

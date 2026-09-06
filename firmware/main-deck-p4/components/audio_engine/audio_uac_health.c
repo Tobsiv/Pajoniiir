@@ -61,7 +61,8 @@ audio_uac_health_result_t audio_uac_health_sample(
     uint32_t capacity_frames,
     uint32_t dropped_blocks,
     uint32_t overflow_frames,
-    uint32_t underflow_frames)
+    uint32_t underflow_frames,
+    uint32_t packet_lost_frames)
 {
     audio_uac_health_result_t result = {
         .low_alarm_frames = audio_uac_ring_low_alarm_frames(capacity_frames),
@@ -79,11 +80,14 @@ audio_uac_health_result_t audio_uac_health_sample(
             counter_delta(overflow_frames, monitor->last_overflow_frames);
         result.delta_underflow_frames =
             counter_delta(underflow_frames, monitor->last_underflow_frames);
+        result.delta_packet_lost_frames =
+            counter_delta(packet_lost_frames, monitor->last_packet_lost_frames);
     }
 
     monitor->last_dropped_blocks = dropped_blocks;
     monitor->last_overflow_frames = overflow_frames;
     monitor->last_underflow_frames = underflow_frames;
+    monitor->last_packet_lost_frames = packet_lost_frames;
     monitor->last_playback_active = playback_active;
     monitor->initialized = true;
 
@@ -92,6 +96,7 @@ audio_uac_health_result_t audio_uac_health_sample(
         result.delta_dropped_blocks = 0u;
         result.delta_overflow_frames = 0u;
         result.delta_underflow_frames = 0u;
+        result.delta_packet_lost_frames = 0u;
         return result;
     }
     if (playback_started) {
@@ -99,6 +104,7 @@ audio_uac_health_result_t audio_uac_health_sample(
         result.delta_dropped_blocks = 0u;
         result.delta_overflow_frames = 0u;
         result.delta_underflow_frames = 0u;
+        result.delta_packet_lost_frames = 0u;
     }
 
     audio_uac_ring_state_t state = audio_uac_ring_state(
@@ -108,10 +114,11 @@ audio_uac_health_result_t audio_uac_health_sample(
     if (result.delta_dropped_blocks > 0u) result.flags |= AUDIO_UAC_HEALTH_DROPPED;
     if (result.delta_overflow_frames > 0u) result.flags |= AUDIO_UAC_HEALTH_OVERFLOW;
     if (result.delta_underflow_frames > 0u) result.flags |= AUDIO_UAC_HEALTH_UNDERFLOW;
+    if (result.delta_packet_lost_frames > 0u) result.flags |= AUDIO_UAC_HEALTH_PACKET_LOSS;
     monitor->active_data_loss_flags |= result.flags &
         (AUDIO_UAC_HEALTH_DROPPED |
          AUDIO_UAC_HEALTH_OVERFLOW |
-         AUDIO_UAC_HEALTH_UNDERFLOW);
+         AUDIO_UAC_HEALTH_UNDERFLOW | AUDIO_UAC_HEALTH_PACKET_LOSS);
     result.active_data_loss_flags = monitor->active_data_loss_flags;
     return result;
 }

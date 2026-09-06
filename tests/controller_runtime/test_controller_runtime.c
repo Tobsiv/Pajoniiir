@@ -9,6 +9,7 @@ static unsigned s_checks;
 static flx4_control_event_t s_events[256];
 static size_t s_event_count;
 static unsigned s_fail_deliveries;
+static bool s_disconnect_in_callback;
 
 #define CHECK(expr) do { \
     s_checks++; \
@@ -27,6 +28,10 @@ static esp_err_t event_cb(const flx4_control_event_t *event, void *ctx)
     }
     if (s_event_count < sizeof(s_events) / sizeof(s_events[0])) {
         s_events[s_event_count++] = *event;
+    }
+    if (s_disconnect_in_callback) {
+        s_disconnect_in_callback = false;
+        controller_runtime_set_connected(false);
     }
     return ESP_OK;
 }
@@ -157,6 +162,36 @@ int main(void)
     CHECK(diagnostics.held_reconciliations == 2u);
     CHECK(diagnostics.semantic_events == 2u);
     CHECK(diagnostics.queued_events == 64u);
+
+    /* Connection state must survive both queue saturation and downstream
+     * backpressure. A callback may race a newer physical connection edge. */
+    controller_runtime_config_t connection_config = config;
+    connection_config.publish_connection_events = true;
+    CHECK(controller_runtime_init(&connection_config) == ESP_OK);
+    controller_runtime_set_builtin_flx4_enabled(true);
+    s_event_count = 0;
+    for (size_t i = 0; i < 64; ++i) {
+        message = midi(0x90, 0x0B, (uint8_t)((i & 1) ? 127 : 0));
+        CHECK(controller_runtime_handle_midi(&message));
+    }
+    controller_runtime_set_connected(true);
+    s_fail_deliveries = 2;
+    CHECK(controller_runtime_dispatch_pending(1) == 0);
+    CHECK(controller_runtime_dispatch_pending(1) == 0);
+    dispatch_one_and_check(1);
+    CHECK(s_events[0].id == CTRL_ID_FLX4_CONNECTION);
+    CHECK(s_events[0].value == CTRL_FLX4_CONNECTED);
+    controller_runtime_set_connected(false);
+    controller_runtime_set_connected(true);
+    dispatch_one_and_check(2);
+    CHECK(s_events[1].value == CTRL_FLX4_DISCONNECTED);
+    s_disconnect_in_callback = true;
+    dispatch_one_and_check(3);
+    CHECK(s_events[2].id == CTRL_ID_FLX4_CONNECTION);
+    CHECK(s_events[2].value == CTRL_FLX4_CONNECTED);
+    dispatch_one_and_check(4);
+    CHECK(s_events[3].id == CTRL_ID_FLX4_CONNECTION);
+    CHECK(s_events[3].value == CTRL_FLX4_DISCONNECTED);
 
     printf("PASS bounded P4 local FLX4 controller runtime\n");
     printf("CHECKS=%u EVENTS=%zu\n", s_checks, s_event_count);
