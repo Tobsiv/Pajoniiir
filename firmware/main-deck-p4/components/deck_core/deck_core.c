@@ -3175,6 +3175,7 @@ static esp_err_t loaded_track_result_to_esp(
 esp_err_t deck_core_publish_loaded_track(uint8_t deck,
                                          uint32_t media_generation,
                                          uint32_t track_key,
+                                         uint8_t source_slot,
                                          uint16_t bpm,
                                          uint32_t duration_ms,
                                          const anlz_metadata_t *anlz)
@@ -3184,6 +3185,7 @@ esp_err_t deck_core_publish_loaded_track(uint8_t deck,
         .track_key = track_key,
         .duration_ms = duration_ms,
         .bpm = bpm,
+        .source_slot = source_slot,
         .anlz = anlz,
     };
     return loaded_track_result_to_esp(deck_loaded_track_store_publish(
@@ -3201,6 +3203,13 @@ esp_err_t deck_core_clear_loaded_tracks(uint32_t media_generation)
 {
     return loaded_track_result_to_esp(deck_loaded_track_store_clear_all(
         &s_loaded_tracks, media_generation));
+}
+
+esp_err_t deck_core_clear_loaded_tracks_for_source(uint8_t source_slot,
+                                                   uint32_t media_generation)
+{
+    return loaded_track_result_to_esp(deck_loaded_track_store_clear_source(
+        &s_loaded_tracks, source_slot, media_generation));
 }
 
 bool deck_core_get_loaded_track(uint8_t deck,

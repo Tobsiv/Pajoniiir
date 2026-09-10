@@ -117,7 +117,7 @@ function fetchLibrary() {
         .then(data => {
             libraryGeneration = Number.isInteger(data.generation) ? data.generation : 0;
             libraryData = data.tracks || [];
-            renderLibrary(libraryData);
+            filterLibrary();
         })
         .catch(err => {
             console.error('Greška kod dohvaćanja knjižnice:', err);
@@ -134,10 +134,11 @@ function renderLibrary(tracks) {
     }
 
     tbody.innerHTML = tracks.map(track => {
+        const src = track.source ? `<span class="lib-src">${escapeHtml(track.source)}</span>` : '';
         return `
             <tr>
                 <td>
-                    <div class="lib-title">${escapeHtml(track.title)}</div>
+                    <div class="lib-title">${src}${escapeHtml(track.title)}</div>
                     <div class="lib-artist">${escapeHtml(track.artist)}</div>
                 </td>
                 <td class="lib-bpm">${track.bpm}</td>
@@ -152,14 +153,29 @@ function renderLibrary(tracks) {
     }).join('');
 }
 
+function librarySources() {
+    return [...new Set(libraryData.map(t => t.source).filter(Boolean))].sort();
+}
+
 function filterLibrary() {
     const query = document.getElementById('search-input').value.toLowerCase().trim();
-    if (!query) {
-        renderLibrary(libraryData);
-        return;
+    const srcSel = document.getElementById('source-filter');
+    const src = srcSel ? srcSel.value : 'ALL';
+
+    // Keep the source dropdown options in sync with what the library reports.
+    if (srcSel) {
+        const want = ['ALL', ...librarySources()].join('|');
+        if (srcSel.dataset.opts !== want) {
+            srcSel.dataset.opts = want;
+            const cur = srcSel.value;
+            srcSel.innerHTML = ['ALL', ...librarySources()]
+                .map(s => `<option${s === cur ? ' selected' : ''}>${s}</option>`).join('');
+        }
     }
 
     const filtered = libraryData.filter(track => {
+        if (src !== 'ALL' && track.source !== src) return false;
+        if (!query) return true;
         return (track.title && track.title.toLowerCase().includes(query)) ||
                (track.artist && track.artist.toLowerCase().includes(query));
     });

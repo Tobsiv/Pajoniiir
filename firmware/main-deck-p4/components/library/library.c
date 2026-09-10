@@ -25,13 +25,14 @@
  * Marking it used keeps -Wall clean there without an #ifdef around every log. */
 __attribute__((unused)) static const char *TAG = "library";
 
-/* USB drive mount point — set by USB host VFS when the drive is mounted */
+/* Default source-0 mount point. The USB layer registers real mount paths via
+ * library_source_set(); the simulator falls back to this fixed path. */
 #ifndef WIN32
 #define USB_MOUNT_POINT  "/usb"
 #else
 #define USB_MOUNT_POINT  "C:/Users/klikn/Music/USB"
 #endif
-#define USB_PDB_PATH     USB_MOUNT_POINT "/PIONEER/rekordbox/export.pdb"
+#define PDB_RELPATH      "/PIONEER/rekordbox/export.pdb"
 
 /* Track records are built transactionally into the inactive PSRAM buffer and
  * become immutable once published. Sorting never copies or moves these ~2.9 KiB
@@ -44,7 +45,7 @@ __attribute__((unused)) static const char *TAG = "library";
  * lifetime of the process even for a ten-track stick. Only the rebuild window
  * pays for two buffers; the superseded one is released as soon as the swap has
  * happened under the lock, so steady state holds exactly one. */
-#define LIBRARY_MAX_TRACKS  1024
+#define LIBRARY_MAX_TRACKS  2048
 
 typedef uint16_t library_order_entry_t;
 _Static_assert(LIBRARY_MAX_TRACKS <= UINT16_MAX,
@@ -55,14 +56,28 @@ static int              s_track_cap[2] = { 0, 0 };
 static library_order_entry_t *s_order_buf[2] = { NULL, NULL };
 static int              s_active_buf = 0;
 static int              s_active_order_buf = 0;
-static int              s_track_count = 0;
+static int              s_track_count = 0;   /* visible (filtered) row count */
+static int              s_record_count = 0;  /* records in the active buffer */
 static uint32_t         s_generation = 0;
 static SemaphoreHandle_t s_library_mutex = NULL;
 static bool             s_index_building = false;
 
+/* Registered USB sources; slot 0 defaults to USB_MOUNT_POINT. An empty string
+ * means "not registered" — library_init() skips it. */
+static char             s_source_mount[LIBRARY_MAX_SOURCES][48];
+static int              s_source_filter = -1;   /* -1 = all */
+static int              s_sort_field = -1;       /* last library_sort() field */
+static bool             s_sort_desc = false;
+
 static anlz_metadata_t s_current_meta;
 static bool            s_current_meta_valid = false;
 static int             s_ui_track_idx = 0;
+
+/* Sort `order`[0..count) (indices into `tracks`) in place by the remembered
+ * s_sort_field/s_sort_desc; no-op if no sort has been requested. Caller holds
+ * s_library_mutex. */
+static void sort_order_locked(const library_track_t *tracks,
+                              library_order_entry_t *order, int count);
 
 /* Timing/source of the most recent library_load_anlz() resolve, published for
  * the service log's authoritative track-load event. */
@@ -94,6 +109,59 @@ static esp_err_t ensure_library_mutex(void)
     return s_library_mutex ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
+/* ── USB source registry ──────────────────────────────────────────────────── */
+
+static const char *source_mount_unlocked(uint8_t slot)
+{
+    if (slot >= LIBRARY_MAX_SOURCES) {
+        return "";
+    }
+    if (s_source_mount[slot][0] != '\0') {
+        return s_source_mount[slot];
+    }
+    return (slot == 0u) ? USB_MOUNT_POINT : "";
+}
+
+esp_err_t library_source_set(uint8_t slot, const char *mount_path)
+{
+    if (slot >= LIBRARY_MAX_SOURCES || !mount_path || mount_path[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_RETURN_ON_ERROR(ensure_library_mutex(), TAG, "library mutex");
+    xSemaphoreTakeRecursive(s_library_mutex, portMAX_DELAY);
+    library_copy_str(s_source_mount[slot], sizeof(s_source_mount[slot]), mount_path);
+    xSemaphoreGiveRecursive(s_library_mutex);
+    return ESP_OK;
+}
+
+esp_err_t library_source_clear(uint8_t slot)
+{
+    if (slot >= LIBRARY_MAX_SOURCES) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_RETURN_ON_ERROR(ensure_library_mutex(), TAG, "library mutex");
+    xSemaphoreTakeRecursive(s_library_mutex, portMAX_DELAY);
+    s_source_mount[slot][0] = '\0';
+    xSemaphoreGiveRecursive(s_library_mutex);
+    return ESP_OK;
+}
+
+const char *library_source_mount_path(uint8_t slot)
+{
+    if (ensure_library_mutex() != ESP_OK) {
+        return "";
+    }
+    xSemaphoreTakeRecursive(s_library_mutex, portMAX_DELAY);
+    const char *p = source_mount_unlocked(slot);
+    xSemaphoreGiveRecursive(s_library_mutex);
+    return p;
+}
+
+int library_get_source_filter(void)
+{
+    return s_source_filter;
+}
+
 /* Order tables are 2 KiB each at the maximum track count, so they stay fixed-size
  * and preallocated; only the multi-megabyte record buffers are demand-sized. */
 static esp_err_t ensure_index_buffers(void)
@@ -119,8 +187,10 @@ static esp_err_t ensure_index_buffers(void)
 /* Give buffer slot `buf` room for `count` records, reusing it when it is already
  * large enough. A rebuild that shrinks the catalog keeps the larger allocation
  * rather than churning multi-megabyte PSRAM blocks; the superseded slot is
- * released after publish, which is what actually bounds steady-state usage. */
-static esp_err_t reserve_track_buffer(int buf, int count)
+ * released after publish, which is what actually bounds steady-state usage.
+ * A grow preserves `preserve` existing records (0 for a fresh build) so a
+ * merge across several sources can grow the buffer as it goes. */
+static esp_err_t reserve_track_buffer(int buf, int count, int preserve)
 {
     if (count <= 0) count = 1;
     if (s_track_buf[buf] && s_track_cap[buf] >= count) {
@@ -139,6 +209,10 @@ static esp_err_t reserve_track_buffer(int buf, int count)
         return ESP_ERR_NO_MEM;
     }
 
+    if (preserve > 0 && s_track_buf[buf]) {
+        int keep = preserve < s_track_cap[buf] ? preserve : s_track_cap[buf];
+        memcpy(fresh, s_track_buf[buf], (size_t)keep * sizeof(library_track_t));
+    }
     free(s_track_buf[buf]);
     s_track_buf[buf] = fresh;
     s_track_cap[buf] = count;
@@ -174,7 +248,7 @@ static int library_slot_for_row_unlocked(int row)
         return -1;
     }
     int slot = (int)order[row];
-    return slot < s_track_count ? slot : -1;
+    return slot < s_record_count ? slot : -1;
 }
 
 uint32_t library_track_key(const library_track_t *track)
@@ -182,17 +256,26 @@ uint32_t library_track_key(const library_track_t *track)
     if (!track) {
         return 0;
     }
-    if (track->track_id != 0) {
-        return track->track_id;
-    }
 
-    uint32_t hash = 2166136261u;
-    const unsigned char *p = (const unsigned char *)track->path;
-    while (*p) {
-        hash ^= (uint32_t)(*p++);
-        hash *= 16777619u;
+    uint32_t base;
+    if (track->track_id != 0) {
+        base = track->track_id;
+    } else {
+        base = 2166136261u;
+        const unsigned char *p = (const unsigned char *)track->path;
+        while (*p) {
+            base ^= (uint32_t)(*p++);
+            base *= 16777619u;
+        }
     }
-    return hash == 0 ? 1u : hash;
+    /* Rekordbox track ids number from 1 per export, so two sticks collide.
+     * Fold the source slot into the top 4 bits; a stick that keeps its slot
+     * keeps byte-identical keys across a rebuild triggered by another stick. */
+    base &= 0x0FFFFFFFu;
+    if (base == 0u) {
+        base = 1u;
+    }
+    return ((uint32_t)(track->source_slot & 0x0Fu) << 28) | base;
 }
 
 static void library_build_anlz_paths(const library_track_t *track,
@@ -205,7 +288,8 @@ static void library_build_anlz_paths(const library_track_t *track,
         return;
     }
     if (track->anlz_path[0] == '/') {
-        snprintf(dat_path, dat_len, "%s%s", USB_MOUNT_POINT, track->anlz_path);
+        snprintf(dat_path, dat_len, "%s%s",
+                 source_mount_unlocked(track->source_slot), track->anlz_path);
     } else {
         snprintf(dat_path, dat_len, "%s", track->anlz_path);
     }
@@ -246,24 +330,32 @@ static void library_apply_meta_to_track(library_track_t *track, const anlz_metad
 
 /* ── library_init ─────────────────────────────────────────────────────────── *
  *
- * Opens export.pdb and builds a fresh inactive index before publishing it.
- *
- * The PDB provides:
- *   • audio file path  (file_path)
- *   • ANLZ file path   (anlz_path) — direct, no directory-walking needed
- *   • title, artist, album
- *   • BPM (coarse, from PDB tempo field)
- *
- * Precise BPM, beat-grid, cues, and waveforms are loaded later on-demand
- * via library_load_anlz().
+ * Builds one merged immutable index from every registered USB source's
+ * export.pdb, then publishes it transactionally (one generation bump). Each
+ * record is tagged with its source_slot; the order table is the filtered +
+ * sorted view. Precise BPM/beat-grid/cues/waveforms load on demand later via
+ * library_load_anlz().
  */
+static void copy_pdb_row_locked_free(library_track_t *lt, const pdb_track_t *pt,
+                                     uint8_t slot)
+{
+    memset(lt, 0, sizeof(*lt));
+    library_copy_str(lt->path,      sizeof(lt->path),      pt->file_path);
+    library_copy_str(lt->anlz_path, sizeof(lt->anlz_path), pt->anlz_path);
+    library_copy_str(lt->title,     sizeof(lt->title),     pt->title);
+    library_copy_str(lt->artist,    sizeof(lt->artist),    pt->artist);
+    library_copy_str(lt->album,     sizeof(lt->album),     pt->album);
+    lt->track_id = pt->track_id;
+    lt->bpm      = pt->bpm;
+    lt->duration_ms = (uint32_t)pt->duration_s * 1000u;
+    library_copy_str(lt->key, sizeof(lt->key), pt->key);
+    lt->source_slot = slot;
+}
+
 esp_err_t library_init(void)
 {
     ESP_RETURN_ON_ERROR(ensure_library_mutex(), TAG, "library mutex");
 
-    /* Reserve the inactive buffer before doing slow media I/O.  A mount event,
-     * startup probe and UI sort may otherwise select and mutate the same
-     * buffer concurrently. */
     xSemaphoreTakeRecursive(s_library_mutex, portMAX_DELAY);
     if (s_index_building) {
         xSemaphoreGiveRecursive(s_library_mutex);
@@ -278,124 +370,169 @@ esp_err_t library_init(void)
     s_index_building = true;
     int build_buf = s_active_buf ^ 1;
     uint32_t build_generation = s_generation;
+    int filter = s_source_filter;
+    char sources[LIBRARY_MAX_SOURCES][48];
+    for (uint8_t s = 0; s < LIBRARY_MAX_SOURCES; ++s) {
+        library_copy_str(sources[s], sizeof(sources[s]), source_mount_unlocked(s));
+    }
     xSemaphoreGiveRecursive(s_library_mutex);
 
     int build_order_buf = s_active_order_buf ^ 1;
     library_order_entry_t *build_order = s_order_buf[build_order_buf];
     int build_count = 0;
+    int sources_scanned = 0;
 
-    /* media_io_gate serialises every USB reader, and the audio decode path takes
-     * it on each compressed-cache miss. Holding it across the whole catalog walk
-     * therefore blocked playback for the entire parse - up to LIBRARY_MAX_TRACKS
-     * reads - so loading the library stalled both decks. Take the gate per USB
-     * operation instead: the parse gets slightly more gate traffic, and audio
-     * gets to interleave.
-     *
-     * Releasing between rows also makes an unmount observable mid-parse rather
-     * than something the parse holds straight through, which the loop below
-     * checks for. */
-    pdb_t *pdb = NULL;
-    media_io_gate_begin();
-    rc = pdb_open(USB_PDB_PATH, &pdb);
-    int n = (rc == ESP_OK) ? pdb_track_count(pdb) : 0;
-    media_io_gate_end();
-    if (rc != ESP_OK) {
-        xSemaphoreTakeRecursive(s_library_mutex, portMAX_DELAY);
-        s_index_building = false;
-        xSemaphoreGiveRecursive(s_library_mutex);
-        ESP_LOGW(TAG, "PDB not found at %s (USB not mounted?)", USB_PDB_PATH);
-        return rc;
-    }
+    for (uint8_t slot = 0; slot < LIBRARY_MAX_SOURCES; ++slot) {
+        if (sources[slot][0] == '\0' || build_count >= LIBRARY_MAX_TRACKS) {
+            continue;
+        }
+        char pdb_path[48 + sizeof(PDB_RELPATH) + 8];
+        snprintf(pdb_path, sizeof(pdb_path), "%.47s%s", sources[slot], PDB_RELPATH);
 
-    if (n > LIBRARY_MAX_TRACKS) n = LIBRARY_MAX_TRACKS;
+        pdb_t *pdb = NULL;
+        media_io_gate_begin();
+        rc = pdb_open(pdb_path, &pdb);
+        int n = (rc == ESP_OK) ? pdb_track_count(pdb) : 0;
+        media_io_gate_end();
+        if (rc != ESP_OK) {
+            ESP_LOGW(TAG, "no Rekordbox export at %s (%s)",
+                     pdb_path, esp_err_to_name(rc));
+            continue;
+        }
+        sources_scanned++;
+        if (build_count + n > LIBRARY_MAX_TRACKS) {
+            n = LIBRARY_MAX_TRACKS - build_count;
+        }
 
-    /* Size the record buffer now that the real track count is known, rather than
-     * reserving LIBRARY_MAX_TRACKS up front. */
-    rc = reserve_track_buffer(build_buf, n);
-    if (rc != ESP_OK) {
+        rc = reserve_track_buffer(build_buf, build_count + n, build_count);
+        if (rc != ESP_OK) {
+            media_io_gate_begin();
+            pdb_close(pdb);
+            media_io_gate_end();
+            break;   /* publish whatever earlier sources produced */
+        }
+        library_track_t *build_index = s_track_buf[build_buf];
+
+        for (int i = 0; i < n; i++) {
+            pdb_track_t pt;
+            media_io_gate_begin();
+            esp_err_t row_rc = pdb_get_track(pdb, i, &pt);
+            media_io_gate_end();
+            /* A stick can vanish mid-parse now that the gate is released between
+             * rows. Stop this source; other mounted sticks still publish. */
+            if (!media_io_gate_is_available()) {
+                ESP_LOGW(TAG, "media on %s went away %d/%d rows in",
+                         sources[slot], i, n);
+                break;
+            }
+            if (row_rc != ESP_OK) continue;
+            copy_pdb_row_locked_free(&build_index[build_count], &pt, slot);
+            build_count++;
+        }
+
         media_io_gate_begin();
         pdb_close(pdb);
         media_io_gate_end();
+    }
+
+    if (sources_scanned == 0) {
         xSemaphoreTakeRecursive(s_library_mutex, portMAX_DELAY);
         s_index_building = false;
         xSemaphoreGiveRecursive(s_library_mutex);
-        return rc;
+        ESP_LOGW(TAG, "library_init: no Rekordbox source mounted");
+        return ESP_ERR_NOT_FOUND;
     }
+
+    /* Build the filtered view order (record index order for now; the sort is
+     * re-applied under the lock so it matches whatever field is active). */
     library_track_t *build_index = s_track_buf[build_buf];
-    memset(build_index, 0, (size_t)s_track_cap[build_buf] * sizeof(library_track_t));
-
-    for (int i = 0; i < n; i++) {
-        pdb_track_t pt;
-        media_io_gate_begin();
-        esp_err_t row_rc = pdb_get_track(pdb, i, &pt);
-        media_io_gate_end();
-
-        /* The drive can go away between rows now that the gate is released
-         * there. Check before acting on row_rc, not after: an unmount makes
-         * every remaining read fail, and `continue` would then walk the whole
-         * rest of the catalog against a dead mount. Stop instead - the rows
-         * gathered so far are still published, which is what the old code
-         * produced for a mid-parse read failure anyway. */
-        if (!media_io_gate_is_available()) {
-            ESP_LOGW(TAG, "media went away %d/%d rows into the catalog walk", i, n);
-            break;
-        }
-        if (row_rc != ESP_OK) continue;
-
-        library_track_t *lt = &build_index[build_count];
-        memset(lt, 0, sizeof(*lt));
-
-        library_copy_str(lt->path,      sizeof(lt->path),      pt.file_path);
-        library_copy_str(lt->anlz_path, sizeof(lt->anlz_path), pt.anlz_path);
-        library_copy_str(lt->title,     sizeof(lt->title),     pt.title);
-        library_copy_str(lt->artist,    sizeof(lt->artist),    pt.artist);
-        library_copy_str(lt->album,     sizeof(lt->album),     pt.album);
-        lt->track_id = pt.track_id;
-        lt->bpm      = pt.bpm;
-        lt->duration_ms = (uint32_t)pt.duration_s * 1000u;
-        library_copy_str(lt->key, sizeof(lt->key), pt.key);
-
-        build_count++;
-    }
-
-    media_io_gate_begin();
-    pdb_close(pdb);
-    media_io_gate_end();
-
+    int view_count = 0;
     for (int i = 0; i < build_count; ++i) {
-        build_order[i] = (library_order_entry_t)i;
+        if (filter < 0 || build_index[i].source_slot == (uint8_t)filter) {
+            build_order[view_count++] = (library_order_entry_t)i;
+        }
     }
 
     xSemaphoreTakeRecursive(s_library_mutex, portMAX_DELAY);
     if (s_generation != build_generation) {
-        /* library_clear() ran while the media was being parsed (for example,
-         * because the drive was removed).  Never republish that stale index. */
         s_index_building = false;
         xSemaphoreGiveRecursive(s_library_mutex);
         ESP_LOGW(TAG, "Discarding stale library index build");
         return ESP_ERR_INVALID_STATE;
     }
+    sort_order_locked(build_index, build_order, view_count);
     const int superseded_buf = s_active_buf;
     s_active_buf = build_buf;
     s_active_order_buf = build_order_buf;
-    s_track_count = build_count;
-    if (s_ui_track_idx >= build_count) {
+    s_record_count = build_count;
+    s_track_count = view_count;
+    if (s_ui_track_idx >= view_count) {
         s_ui_track_idx = 0;
     }
     s_generation++;
     s_index_building = false;
-    /* The previously published records are now unreachable: every reader resolves
-     * through active_tracks() while holding this same lock. Releasing here is what
-     * keeps steady-state usage at one record buffer instead of two. */
     if (superseded_buf != build_buf) {
         release_track_buffer_locked(superseded_buf);
     }
     xSemaphoreGiveRecursive(s_library_mutex);
 
-    ESP_LOGI(TAG, "Library ready: %d tracks from PDB (%u KiB of records)",
-             build_count,
-             (unsigned)(((size_t)build_count * sizeof(library_track_t)) / 1024u));
+    ESP_LOGI(TAG, "Library ready: %d records from %d source(s), %d visible",
+             build_count, sources_scanned, view_count);
     return ESP_OK;
+}
+
+/* ── source filter ───────────────────────────────────────────────────────── */
+
+void library_set_source_filter(int slot)
+{
+    if (ensure_library_mutex() != ESP_OK) return;
+    if (slot < -1 || slot >= LIBRARY_MAX_SOURCES) slot = -1;
+
+    xSemaphoreTakeRecursive(s_library_mutex, portMAX_DELAY);
+    if (slot == s_source_filter || s_index_building) {
+        s_source_filter = slot;
+        xSemaphoreGiveRecursive(s_library_mutex);
+        return;
+    }
+    s_source_filter = slot;
+
+    library_track_t *tracks = active_tracks();
+    int build_order_buf = s_active_order_buf ^ 1;
+    library_order_entry_t *order = s_order_buf[build_order_buf];
+    if (tracks && order) {
+        int view_count = 0;
+        for (int i = 0; i < s_record_count; ++i) {
+            if (slot < 0 || tracks[i].source_slot == (uint8_t)slot) {
+                order[view_count++] = (library_order_entry_t)i;
+            }
+        }
+        sort_order_locked(tracks, order, view_count);
+        s_active_order_buf = build_order_buf;
+        s_track_count = view_count;
+        if (s_ui_track_idx >= view_count) s_ui_track_idx = 0;
+        s_generation++;
+    }
+    xSemaphoreGiveRecursive(s_library_mutex);
+}
+
+esp_err_t library_find_record_by_key(uint32_t track_key, library_track_t *out)
+{
+    if (!out || track_key == 0u) return ESP_ERR_INVALID_ARG;
+    if (ensure_library_mutex() != ESP_OK) return ESP_ERR_NOT_FOUND;
+    xSemaphoreTakeRecursive(s_library_mutex, portMAX_DELAY);
+    library_track_t *idx = active_tracks();
+    esp_err_t rc = ESP_ERR_NOT_FOUND;
+    if (idx) {
+        for (int i = 0; i < s_record_count; ++i) {
+            if (library_track_key(&idx[i]) == track_key) {
+                *out = idx[i];
+                rc = ESP_OK;
+                break;
+            }
+        }
+    }
+    xSemaphoreGiveRecursive(s_library_mutex);
+    return rc;
 }
 
 /* ── library_count ────────────────────────────────────────────────────────── */
@@ -427,6 +564,7 @@ void library_clear(void)
         s_current_meta_valid = false;
     }
     s_track_count = 0;
+    s_record_count = 0;
     s_generation++;
     s_ui_track_idx = 0;
     xSemaphoreGiveRecursive(s_library_mutex);
@@ -867,56 +1005,51 @@ static int compare_order_entries(const void *a, const void *b)
     return cmp;
 }
 
+static void sort_order_locked(const library_track_t *tracks,
+                              library_order_entry_t *order, int count)
+{
+    if (!tracks || !order || count <= 1 || s_sort_field < 0) {
+        return;
+    }
+    switch (s_sort_field) {
+    case 0: s_sort_track_compare = s_sort_desc ? compare_artist_desc : compare_artist_asc; break;
+    case 1: s_sort_track_compare = s_sort_desc ? compare_title_desc  : compare_title_asc;  break;
+    case 2: s_sort_track_compare = s_sort_desc ? compare_bpm_desc    : compare_bpm_asc;    break;
+    case 3: s_sort_track_compare = s_sort_desc ? compare_key_desc    : compare_key_asc;    break;
+    default: return;
+    }
+    s_sort_tracks = tracks;
+    qsort(order, (size_t)count, sizeof(library_order_entry_t), compare_order_entries);
+    s_sort_tracks = NULL;
+    s_sort_track_compare = NULL;
+}
+
 void library_sort(int field_type, bool descending)
 {
     if (ensure_library_mutex() != ESP_OK) return;
+    if (field_type < 0 || field_type > 3) {
+        ESP_LOGW(TAG, "Ignoring unsupported library sort field %d", field_type);
+        return;
+    }
     xSemaphoreTakeRecursive(s_library_mutex, portMAX_DELAY);
     if (s_index_building) {
         xSemaphoreGiveRecursive(s_library_mutex);
         ESP_LOGW(TAG, "Ignoring sort while library index build is in progress");
         return;
     }
+    s_sort_field = field_type;
+    s_sort_desc = descending;
 
-    library_track_t *tracks = active_tracks();
     library_order_entry_t *source_order = active_order();
-    if (!tracks || !source_order || s_track_count <= 1) {
-        xSemaphoreGiveRecursive(s_library_mutex);
-        return;
-    }
-
-    if (field_type == 0) { // Artist
-        s_sort_track_compare = descending ? compare_artist_desc : compare_artist_asc;
-    } else if (field_type == 1) { // Title / Name
-        s_sort_track_compare = descending ? compare_title_desc : compare_title_asc;
-    } else if (field_type == 2) { // BPM
-        s_sort_track_compare = descending ? compare_bpm_desc : compare_bpm_asc;
-    } else if (field_type == 3) { // Key
-        s_sort_track_compare = descending ? compare_key_desc : compare_key_asc;
-    } else {
-        xSemaphoreGiveRecursive(s_library_mutex);
-        ESP_LOGW(TAG, "Ignoring unsupported library sort field %d", field_type);
-        return;
-    }
-
-    /* Publish-on-write now copies only the compact row order (2 KiB at the
-     * 1024-track maximum), not ~2.9 MiB of library_track_t records. */
     int build_order_buf = s_active_order_buf ^ 1;
     library_order_entry_t *order = s_order_buf[build_order_buf];
-    if (!order) {
-        xSemaphoreGiveRecursive(s_library_mutex);
-        return;
+    if (source_order && order && s_track_count > 1) {
+        memcpy(order, source_order,
+               (size_t)s_track_count * sizeof(library_order_entry_t));
+        sort_order_locked(active_tracks(), order, s_track_count);
+        s_active_order_buf = build_order_buf;
+        s_generation++;
     }
-    memcpy(order, source_order,
-           (size_t)s_track_count * sizeof(library_order_entry_t));
-
-    s_sort_tracks = tracks;
-    qsort(order, (size_t)s_track_count, sizeof(library_order_entry_t),
-          compare_order_entries);
-    s_sort_tracks = NULL;
-    s_sort_track_compare = NULL;
-
-    s_active_order_buf = build_order_buf;
-    s_generation++;
     xSemaphoreGiveRecursive(s_library_mutex);
     ESP_LOGI(TAG, "Library order sorted: field=%d, descending=%d", field_type, descending);
 }

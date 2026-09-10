@@ -39,12 +39,18 @@ typedef struct {
     int page_count;
 } ui_library_page_t;
 
+/* `source_slot` < 0 renders no origin badge; 0..(N-1) prefixes the title cell
+ * with a one-letter badge ("A ", "B ", …). */
 void ui_library_format_row_text(ui_library_row_text_t *out,
                                  const char *title,
                                  const char *artist,
                                  const char *key,
                                  uint16_t bpm,
-                                 uint32_t duration_ms);
+                                 uint32_t duration_ms,
+                                 int source_slot);
+
+/* One-letter origin badge for a source slot ('A'.. ), or '\0' for none. */
+char ui_library_source_badge(int source_slot);
 
 ui_library_update_plan_t ui_library_plan_update(int active_tab,
                                                  bool needs_refresh,
@@ -114,6 +120,7 @@ void ui_library_load_initial_track(void);
 void ui_trigger_library_refresh(void);
 void ui_refresh_library(void);
 void ui_notify_usb_removed(void);
+void ui_notify_usb_source_removed(uint8_t source_slot);
 bool ui_is_library_active(void);
 esp_err_t ui_library_select_delta(int delta);
 esp_err_t ui_library_load_selected(void);

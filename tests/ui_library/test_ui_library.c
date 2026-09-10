@@ -27,7 +27,8 @@ static void test_row_format_truncates_long_text_and_formats_duration(void)
                                "An artist name beyond the compact column",
                                "8A",
                                128,
-                               367000);
+                               367000,
+                               -1);
 
     CHECK(strcmp(out.title, "A very long title that ...") == 0);
     CHECK(strcmp(out.artist, "An artist name ...") == 0);
@@ -36,11 +37,26 @@ static void test_row_format_truncates_long_text_and_formats_duration(void)
     CHECK(strcmp(out.duration, "6:07") == 0);
 }
 
+static void test_row_format_prefixes_a_source_badge(void)
+{
+    ui_library_row_text_t out;
+
+    ui_library_format_row_text(&out, "Track One", "DJ Someone", "1A", 120, 60000, 0);
+    CHECK(strcmp(out.title, "A  Track One") == 0);
+
+    ui_library_format_row_text(&out, "Track Two", "DJ Other", "2B", 128, 60000, 1);
+    CHECK(strcmp(out.title, "B  Track Two") == 0);
+
+    CHECK(ui_library_source_badge(-1) == '\0');
+    CHECK(ui_library_source_badge(0) == 'A');
+    CHECK(ui_library_source_badge(2) == 'C');
+}
+
 static void test_row_format_uses_safe_empty_text_for_nulls(void)
 {
     ui_library_row_text_t out;
 
-    ui_library_format_row_text(&out, NULL, NULL, NULL, 0, 0);
+    ui_library_format_row_text(&out, NULL, NULL, NULL, 0, 0, -1);
 
     CHECK(strcmp(out.title, "") == 0);
     CHECK(strcmp(out.artist, "") == 0);
@@ -117,6 +133,7 @@ static void test_page_delta_keeps_relative_row_and_clamps_edges(void)
 int main(void)
 {
     test_row_format_truncates_long_text_and_formats_duration();
+    test_row_format_prefixes_a_source_badge();
     test_row_format_uses_safe_empty_text_for_nulls();
     test_update_plan_uses_flags_and_active_tab();
     test_pagination_bounds_large_library_to_eight_rows();

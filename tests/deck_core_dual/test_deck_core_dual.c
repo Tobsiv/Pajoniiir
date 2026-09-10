@@ -93,6 +93,7 @@ static void publish_loaded_track(uint8_t deck,
     assert(deck_core_publish_loaded_track(deck,
                                           1u,
                                           track_key,
+                                          0u,
                                           bpm,
                                           300000u,
                                           anlz) == ESP_OK);

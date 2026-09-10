@@ -11,6 +11,7 @@ typedef struct {
     uint32_t bpm_x100;
     uint16_t bpm;
     uint8_t deck;
+    uint8_t source_slot;   /* which USB stick the track came from */
     bool valid;
     bool has_anlz;
 } deck_loaded_track_summary_t;

@@ -2793,9 +2793,29 @@ Assert-FileContains `
     -LiteralPatterns @("typedef uint16_t library_order_entry_t", "s_track_buf[2]", "s_order_buf[2]", "library_slot_for_row_unlocked", "sizeof(library_order_entry_t)", "qsort(order")
 
 Assert-FileContains `
+    -Name "library merges every registered USB source with source-salted keys" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/library/library.c") `
+    -LiteralPatterns @(
+        "s_source_mount[LIBRARY_MAX_SOURCES]",
+        "(track->source_slot & 0x0Fu) << 28",
+        "library_find_record_by_key",
+        "library_set_source_filter",
+        "s_record_count")
+
+Assert-FileContains `
+    -Name "USB removal clears only the decks that were playing from that stick" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/main/app_main.c") `
+    -LiteralPatterns @("deck_core_clear_loaded_tracks_for_source", "s.source_slot == slot", "library_source_clear(slot)")
+
+Assert-FileContains `
+    -Name "per-source deck clear leaves the global media floor untouched" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/deck_core/deck_loaded_track_store.c") `
+    -LiteralPatterns @("deck_loaded_track_store_clear_source", "summary[deck].source_slot != source_slot")
+
+Assert-FileContains `
     -Name "library UI bounds LVGL cells to one eight-row page" `
     -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/ui/ui_library.c") `
-    -LiteralPatterns @("UI_LIBRARY_PAGE_ROWS", "ui_library_page_for_selection", "lv_table_set_row_count(s_library_table, (uint32_t)page.row_count)", "lv_obj_clear_flag(s_library_table, LV_OBJ_FLAG_SCROLLABLE)", "PREV", "NEXT", "PAGE %d/%d")
+    -LiteralPatterns @("UI_LIBRARY_PAGE_ROWS", "ui_library_page_for_selection", "lv_table_set_row_count(s_library_table, (uint32_t)page.row_count)", "lv_obj_clear_flag(s_library_table, LV_OBJ_FLAG_SCROLLABLE)", "PREV", "NEXT", "P%d/%d")
 
 Assert-FileContains `
     -Name "library source defines production selected-row helpers directly" `

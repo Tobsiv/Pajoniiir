@@ -11,6 +11,7 @@ typedef struct {
     uint32_t rekordbox_track_id;
     uint16_t bpm;
     uint32_t duration_ms;
+    uint8_t source_slot;   /* which USB stick (0..LIBRARY_MAX_SOURCES-1) */
     char title[96];
     char artist[64];
     char album[64];
@@ -20,6 +21,7 @@ typedef struct {
     uint32_t track_key;
     uint16_t bpm;
     uint32_t duration_ms;
+    uint8_t source_slot;
     char title[96];
     char artist[64];
     char key[16];
@@ -27,6 +29,7 @@ typedef struct {
 
 typedef struct {
     uint32_t track_key;
+    uint8_t source_slot;
     char audio_path[272];
     char dat_path[272];
     char ext_path[272];
@@ -52,6 +55,10 @@ esp_err_t media_catalog_row_key(int index, uint32_t *out_key);
  * lock instead of N full-record copies. */
 int media_catalog_find_index_by_key(uint32_t track_key);
 void media_catalog_sort(int field_type, bool descending);
+
+/* Restrict the visible list to one USB source (0-based) or -1 for all. */
+void media_catalog_set_source_filter(int source_slot);
+int  media_catalog_get_source_filter(void);
 
 /* Legacy index entry point retained for local UI compatibility. It snapshots the
  * stable identity and generation, then delegates to the transactional loader. */

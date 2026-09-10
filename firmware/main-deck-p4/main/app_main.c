@@ -264,21 +264,23 @@ static bool on_recording_toggle(bool enable)
 }
 #endif  /* CONFIG_AUDIO_RECORDER_ENABLED */
 
-// Called from the USB storage task when the Rekordbox drive mounts/unmounts.
-// usb_storage can mount several sticks at once; the library reads slot 0 (`/usb`).
+// Called from the USB storage task when a drive on slot `event->index` mounts or
+// unmounts. The library is rebuilt as the merge of every mounted source; a deck
+// already playing from another stick keeps playing across the change.
 static void on_usb_storage_event(const usb_storage_mount_event_t *event)
 {
-    if (!event || event->index != 0u) {
+    if (!event) {
         return;
     }
-    const bool mounted = event->mounted;
+    const uint8_t slot = event->index;
 
-    if (mounted) {
-        service_log_note(SERVICE_LOG_USB_MOUNTED, SERVICE_LOG_INFO, "rekordbox drive");
+    if (event->mounted) {
+        service_log_note(SERVICE_LOG_USB_MOUNTED, SERVICE_LOG_INFO, event->base_path);
+        library_source_set(slot, event->base_path);
         esp_err_t rc = ESP_FAIL;
         for (int attempt = 1; attempt <= 3; attempt++) {
-            rc = library_init();   // open export.pdb, build the track index
-            if (rc == ESP_OK) {
+            rc = library_init();   // merged rebuild across all registered sources
+            if (rc == ESP_OK || rc == ESP_ERR_NOT_FOUND) {
                 break;
             }
             ESP_LOGW(TAG, "library_init attempt %d failed (%s), retrying in 250ms...",
@@ -286,36 +288,50 @@ static void on_usb_storage_event(const usb_storage_mount_event_t *event)
             vTaskDelay(pdMS_TO_TICKS(250));
         }
         if (rc == ESP_OK) {
-            ESP_LOGW(TAG, "USB media library loaded: %d tracks", library_count());
+            ESP_LOGW(TAG, "USB slot %u mounted; library now %d tracks",
+                     (unsigned)slot, library_count());
             service_log_event(SERVICE_LOG_LIBRARY_LOADED, SERVICE_LOG_INFO,
                               1u, (uint32_t)library_count(), 0u, 0u, 0u, NULL);
         } else {
-            ESP_LOGW(TAG, "library_init after USB mount: %s", esp_err_to_name(rc));
+            ESP_LOGW(TAG, "library_init after USB slot %u mount: %s",
+                     (unsigned)slot, esp_err_to_name(rc));
             service_log_event(SERVICE_LOG_LIBRARY_LOAD_FAILED, SERVICE_LOG_WARN,
                               1u, (uint32_t)rc, 0u, 0u, 0u, esp_err_to_name(rc));
         }
-        ui_trigger_library_refresh();            // repopulate the table in the LVGL task context
-    } else {
-        ESP_LOGW(TAG, "USB drive removed");
-        service_log_note(SERVICE_LOG_USB_UNMOUNTED, SERVICE_LOG_INFO, "drive removed");
-        esp_err_t stop_rc = audio_engine_suspend_loads_and_stop_all();
-        bool owns_load_barrier = stop_rc == ESP_OK;
-        if (stop_rc != ESP_OK) {
-            ESP_LOGE(TAG, "audio_engine_stop on USB removal: %s", esp_err_to_name(stop_rc));
-        }
-        library_clear();
-        esp_err_t clear_rc =
-            deck_core_clear_loaded_tracks(library_generation());
-        if (clear_rc != ESP_OK) {
-            ESP_LOGW(TAG, "deck loaded-track clear on USB removal: %s",
-                     esp_err_to_name(clear_rc));
-        }
-        ui_notify_usb_removed();
         ui_trigger_library_refresh();
-        if (owns_load_barrier) {
-            audio_engine_resume_loads();
+        return;
+    }
+
+    ESP_LOGW(TAG, "USB slot %u removed", (unsigned)slot);
+    service_log_note(SERVICE_LOG_USB_UNMOUNTED, SERVICE_LOG_INFO, event->base_path);
+
+    /* Stop only the decks that were playing from this stick. */
+    for (uint8_t deck = 0u; deck < DECK_CORE_DECK_COUNT; ++deck) {
+        deck_loaded_track_summary_t s;
+        if (deck_core_get_loaded_track(deck, &s) && s.valid && s.source_slot == slot) {
+            (void)audio_engine_deck_stop(deck);
+            deck_core_reset_deck(deck);
         }
     }
+
+    library_source_clear(slot);
+    esp_err_t rc = library_init();
+    if (rc != ESP_OK && rc != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "library_init after USB slot %u removal: %s",
+                 (unsigned)slot, esp_err_to_name(rc));
+    }
+    if (rc == ESP_ERR_NOT_FOUND) {
+        library_clear();   // no sources left
+    }
+
+    esp_err_t clear_rc =
+        deck_core_clear_loaded_tracks_for_source(slot, library_generation());
+    if (clear_rc != ESP_OK) {
+        ESP_LOGW(TAG, "deck clear for source %u: %s",
+                 (unsigned)slot, esp_err_to_name(clear_rc));
+    }
+    ui_notify_usb_source_removed(slot);
+    ui_trigger_library_refresh();
 }
 
 void app_main(void)

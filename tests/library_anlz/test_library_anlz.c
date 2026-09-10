@@ -713,6 +713,64 @@ static void test_catalog_walk_stops_when_the_mount_disappears(void)
     reset_gate_stats();
 }
 
+static void test_merge_two_sources_no_key_collision_and_stable(void)
+{
+    printf("== two sources merge without key collisions, slot-0 keys stable ==\n");
+    library_clear();
+    library_set_source_filter(-1);
+    reset_pdb_fixture();
+    s_pdb_open_result = ESP_OK;
+    s_pdb_track_count = 3;
+    /* The stub ignores the path, so both sources return the same 3 rows with the
+     * same rekordbox ids — exactly the collision the source salt must resolve. */
+    set_pdb_track(0, 1u, "A", "x", "1A", 120u);
+    set_pdb_track(1, 2u, "B", "y", "2A", 122u);
+    set_pdb_track(2, 3u, "C", "z", "3A", 124u);
+
+    CHECK(library_source_set(0u, "/usb") == ESP_OK);
+    CHECK(library_source_set(1u, "/usb2") == ESP_OK);
+    CHECK(library_init() == ESP_OK);
+    CHECK(library_count() == 6);
+
+    /* Every visible key is distinct even though the ids repeat across sources. */
+    uint32_t seen[6];
+    for (int row = 0; row < 6; ++row) {
+        CHECK(library_get_row_key(row, &seen[row]) == ESP_OK);
+        for (int j = 0; j < row; ++j) {
+            CHECK(seen[j] != seen[row]);
+        }
+    }
+
+    /* Capture the source-0 keys, then remove source 1 and rebuild. */
+    library_set_source_filter(0);
+    CHECK(library_count() == 3);
+    uint32_t slot0[3];
+    for (int row = 0; row < 3; ++row) {
+        CHECK(library_get_row_key(row, &slot0[row]) == ESP_OK);
+        CHECK((slot0[row] >> 28) == 0u);   /* source slot 0 in the top nibble */
+    }
+    library_set_source_filter(-1);
+
+    CHECK(library_source_clear(1u) == ESP_OK);
+    CHECK(library_init() == ESP_OK);
+    CHECK(library_count() == 3);
+    for (int row = 0; row < 3; ++row) {
+        uint32_t k = 0u;
+        CHECK(library_get_row_key(row, &k) == ESP_OK);
+        CHECK(k == slot0[row]);   /* byte-identical across the slot-1 rebuild */
+    }
+
+    /* library_find_record_by_key resolves regardless of the visible filter. */
+    library_set_source_filter(0);
+    library_track_t rec;
+    CHECK(library_find_record_by_key(slot0[1], &rec) == ESP_OK);
+    CHECK(library_track_key(&rec) == slot0[1]);
+    library_set_source_filter(-1);
+
+    library_clear();
+    library_source_clear(0u);
+}
+
 int main(void)
 {
     printf("=== library_anlz tests ===\n");
@@ -728,6 +786,7 @@ int main(void)
     test_zero_pdb_duration_falls_back_to_last_beat();
     test_sort_republishes_compact_order_only();
     test_identity_accessors_track_row_order();
+    test_merge_two_sources_no_key_collision_and_stable();
     test_catalog_walk_releases_the_media_gate_between_rows();
     test_catalog_walk_stops_when_the_mount_disappears();
 

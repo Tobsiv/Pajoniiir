@@ -78,6 +78,7 @@ static void fill_catalog_track(const library_track_t *track,
     out_track->rekordbox_track_id = track->track_id;
     out_track->bpm = track->bpm;
     out_track->duration_ms = track->duration_ms;
+    out_track->source_slot = track->source_slot;
     copy_str(out_track->title, sizeof(out_track->title), track->title);
     copy_str(out_track->artist, sizeof(out_track->artist), track->artist);
     copy_str(out_track->album, sizeof(out_track->album), track->album);
@@ -88,9 +89,13 @@ static void fill_loaded_track(const library_track_t *track,
 {
     memset(out_loaded, 0, sizeof(*out_loaded));
     out_loaded->track_key = library_track_key(track);
-    snprintf(out_loaded->audio_path, sizeof(out_loaded->audio_path), "/usb%s", track->path);
+    out_loaded->source_slot = track->source_slot;
+    const char *mount = library_source_mount_path(track->source_slot);
+    snprintf(out_loaded->audio_path, sizeof(out_loaded->audio_path),
+             "%s%s", mount, track->path);
     if (track->anlz_path[0] == '/') {
-        snprintf(out_loaded->dat_path, sizeof(out_loaded->dat_path), "/usb%s", track->anlz_path);
+        snprintf(out_loaded->dat_path, sizeof(out_loaded->dat_path),
+                 "%s%s", mount, track->anlz_path);
     } else {
         copy_str(out_loaded->dat_path, sizeof(out_loaded->dat_path), track->anlz_path);
     }
@@ -153,6 +158,7 @@ esp_err_t media_catalog_get_row(int index, media_catalog_row_t *out_row)
     out_row->track_key = library_track_key(&track);
     out_row->bpm = track.bpm;
     out_row->duration_ms = track.duration_ms;
+    out_row->source_slot = track.source_slot;
     copy_str(out_row->title, sizeof(out_row->title), track.title);
     copy_str(out_row->artist, sizeof(out_row->artist), track.artist);
     copy_str(out_row->key, sizeof(out_row->key), track.key);
@@ -184,6 +190,21 @@ void media_catalog_sort(int field_type, bool descending)
     }
     library_sort(field_type, descending);
     xSemaphoreGive(mutex);
+}
+
+void media_catalog_set_source_filter(int source_slot)
+{
+    SemaphoreHandle_t mutex = catalog_mutex();
+    if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+    library_set_source_filter(source_slot);
+    xSemaphoreGive(mutex);
+}
+
+int media_catalog_get_source_filter(void)
+{
+    return library_get_source_filter();
 }
 
 esp_err_t media_catalog_load_by_identity(uint32_t track_key,
@@ -225,8 +246,7 @@ esp_err_t media_catalog_load_by_identity(uint32_t track_key,
      * materialise exactly one library_track_t. The previous loop copied a ~2.9 KB
      * record per candidate row — up to ~3 MB of memcpy and 1024 lock cycles for a
      * single load on a full catalog. */
-    const int row = library_find_row_by_key(track_key);
-    bool found = (row >= 0) && (library_get(row, track) == ESP_OK) &&
+    bool found = (library_find_record_by_key(track_key, track) == ESP_OK) &&
                  (library_track_key(track) == track_key);
     if (!found) {
         result = library_generation() == expected_generation

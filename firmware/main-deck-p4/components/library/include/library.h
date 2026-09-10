@@ -26,6 +26,7 @@
 
 #define LIBRARY_PATH_MAX  256
 #define LIBRARY_STR_MAX   128
+#define LIBRARY_MAX_SOURCES 4   /* merged library spans this many USB sticks */
 
 typedef struct {
     /* Populated by library_init() from export.pdb */
@@ -38,6 +39,7 @@ typedef struct {
     uint32_t track_id;
     uint16_t bpm;
     uint32_t duration_ms;
+    uint8_t  source_slot;   /* which registered USB source this record came from */
 
     /* Populated by library_load_anlz() */
     uint8_t  waveform_low[400];
@@ -46,6 +48,22 @@ typedef struct {
     uint32_t pvbr[400];
     uint8_t  has_pvbr;
 } library_track_t;
+
+/* Register / unregister a mounted USB source. `mount_path` is the VFS prefix
+ * ("/usb", "/usb2", …). Call library_init() afterwards to (re)build the merged
+ * index across every registered source. */
+esp_err_t   library_source_set(uint8_t slot, const char *mount_path);
+esp_err_t   library_source_clear(uint8_t slot);
+const char *library_source_mount_path(uint8_t slot);   /* "" if unregistered */
+
+/* Restrict the visible list to one source (0..LIBRARY_MAX_SOURCES-1) or -1 for
+ * all. Affects library_count()/library_get()/row-key/find-row/sort/paging; the
+ * loader (library_find_record_by_key) always sees every record. */
+void library_set_source_filter(int slot);
+int  library_get_source_filter(void);
+
+/* Unfiltered record lookup by key — for deck-load resolution. */
+esp_err_t library_find_record_by_key(uint32_t track_key, library_track_t *out);
 
 /* library_init() transactionally publishes an immutable track store. Logical
  * row order is held separately, so library_sort() copies only compact uint16_t

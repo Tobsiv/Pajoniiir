@@ -19,6 +19,7 @@ typedef struct {
     uint32_t track_key;
     uint32_t duration_ms;
     uint16_t bpm;
+    uint8_t source_slot;
     const anlz_metadata_t *anlz;
 } deck_loaded_track_payload_t;
 
@@ -62,6 +63,13 @@ deck_loaded_track_result_t deck_loaded_track_store_clear(
 
 deck_loaded_track_result_t deck_loaded_track_store_clear_all(
     deck_loaded_track_store_t *store,
+    uint32_t media_generation);
+
+/* Clear only decks whose loaded summary has source_slot == `source_slot`.
+ * Does NOT raise media_floor — decks loaded from other sources keep playing. */
+deck_loaded_track_result_t deck_loaded_track_store_clear_source(
+    deck_loaded_track_store_t *store,
+    uint8_t source_slot,
     uint32_t media_generation);
 
 bool deck_loaded_track_store_get(

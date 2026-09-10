@@ -1519,10 +1519,12 @@ static esp_err_t api_library_handler(httpd_req_t *req)
             char item[768];
             web_api_json_escape(row.title, title_esc, sizeof(title_esc));
             web_api_json_escape(row.artist, artist_esc, sizeof(artist_esc));
+            char src = (row.source_slot < 26u)
+                           ? (char)('A' + row.source_slot) : '?';
             int item_len = snprintf(item, sizeof(item),
-                                    "%s{\"index\":%d,\"track_key\":%u,\"title\":\"%s\",\"artist\":\"%s\",\"bpm\":%u,\"duration_ms\":%u}",
+                                    "%s{\"index\":%d,\"track_key\":%u,\"source\":\"%c\",\"title\":\"%s\",\"artist\":\"%s\",\"bpm\":%u,\"duration_ms\":%u}",
                                     first ? "" : ",",
-                                    i, (unsigned)row.track_key, title_esc, artist_esc,
+                                    i, (unsigned)row.track_key, src, title_esc, artist_esc,
                                     row.bpm, (unsigned)row.duration_ms);
             if (item_len < 0 || (size_t)item_len >= sizeof(item)) {
                 ESP_LOGW(TAG, "Skipping oversized library JSON row index=%d", i);

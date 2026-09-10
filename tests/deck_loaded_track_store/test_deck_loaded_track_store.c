@@ -272,6 +272,38 @@ static void test_clear_one_deck_preserves_the_other(void)
     CHECK(second.generation < first.generation);
 }
 
+static void test_clear_source_only_touches_matching_decks(void)
+{
+    puts("== clear_source only touches decks from that source ==");
+    deck_loaded_track_store_t store = {0};
+    deck_loaded_track_payload_t a = payload(4u, 41u, 121u, NULL);
+    a.source_slot = 0u;
+    deck_loaded_track_payload_t b = payload(4u, 42u, 122u, NULL);
+    b.source_slot = 1u;
+    CHECK(deck_loaded_track_store_publish(&store, 0u, &a) == DECK_LOADED_TRACK_OK);
+    CHECK(deck_loaded_track_store_publish(&store, 1u, &b) == DECK_LOADED_TRACK_OK);
+
+    /* Removing source 1 clears deck 1, leaves deck 0 playing, and does NOT
+     * raise the media floor (a later same-generation publish still succeeds). */
+    CHECK(deck_loaded_track_store_clear_source(&store, 1u, 5u) ==
+          DECK_LOADED_TRACK_OK);
+
+    deck_loaded_track_summary_t d0 = {0};
+    deck_loaded_track_summary_t d1 = {0};
+    CHECK(deck_loaded_track_store_get(&store, 0u, &d0));
+    CHECK(deck_loaded_track_store_get(&store, 1u, &d1));
+    CHECK(d0.valid);
+    CHECK(d0.track_key == 41u);
+    CHECK(d0.source_slot == 0u);
+    CHECK(!d1.valid);
+
+    /* media_floor untouched: an old-generation publish to deck 0 is not stale. */
+    deck_loaded_track_payload_t again = payload(4u, 43u, 130u, NULL);
+    again.source_slot = 0u;
+    CHECK(deck_loaded_track_store_publish(&store, 0u, &again) ==
+          DECK_LOADED_TRACK_OK);
+}
+
 static void test_clone_failure_never_partially_replaces_current(void)
 {
     puts("== clone failure never partially replaces current ==");
@@ -445,6 +477,7 @@ int main(void)
     test_stale_clear_cannot_remove_newer_track();
     test_per_deck_clear_rejects_late_old_load();
     test_clear_one_deck_preserves_the_other();
+    test_clear_source_only_touches_matching_decks();
     test_clone_failure_never_partially_replaces_current();
     test_valid_track_without_anlz_uses_coherent_bpm_fallback();
     test_invalid_inputs_leave_store_unchanged();

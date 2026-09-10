@@ -168,6 +168,7 @@ deck_loaded_track_result_t deck_loaded_track_store_publish(
             .bpm_x100 = bpm_x100,
             .bpm = payload->bpm,
             .deck = deck,
+            .source_slot = payload->source_slot,
             .valid = true,
             .has_anlz = next_anlz != NULL,
         };
@@ -228,6 +229,44 @@ deck_loaded_track_result_t deck_loaded_track_store_clear_all(
     } else {
         store->media_floor = media_generation;
         for (uint8_t deck = 0u; deck < DECK_LOADED_TRACK_COUNT; ++deck) {
+            old[deck] = store->anlz[deck];
+            store->anlz[deck] = NULL;
+            store->summary[deck] = (deck_loaded_track_summary_t) {
+                .generation = next_generation(store),
+                .media_generation = media_generation,
+                .deck = deck,
+            };
+        }
+    }
+    writer_leave(store);
+
+    for (uint8_t deck = 0u; deck < DECK_LOADED_TRACK_COUNT; ++deck) {
+        anlz_snapshot_release(old[deck]);
+    }
+    return result;
+}
+
+deck_loaded_track_result_t deck_loaded_track_store_clear_source(
+    deck_loaded_track_store_t *store,
+    uint8_t source_slot,
+    uint32_t media_generation)
+{
+    if (!store) {
+        return DECK_LOADED_TRACK_INVALID;
+    }
+
+    anlz_snapshot_t *old[DECK_LOADED_TRACK_COUNT] = {0};
+    deck_loaded_track_result_t result = DECK_LOADED_TRACK_OK;
+    writer_enter(store);
+    if (media_generation < store->media_floor) {
+        result = DECK_LOADED_TRACK_STALE;
+    } else {
+        for (uint8_t deck = 0u; deck < DECK_LOADED_TRACK_COUNT; ++deck) {
+            if (!store->summary[deck].valid ||
+                store->summary[deck].source_slot != source_slot ||
+                media_generation < store->summary[deck].media_generation) {
+                continue;
+            }
             old[deck] = store->anlz[deck];
             store->anlz[deck] = NULL;
             store->summary[deck] = (deck_loaded_track_summary_t) {

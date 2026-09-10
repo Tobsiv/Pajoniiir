@@ -152,12 +152,17 @@ esp_err_t deck_core_queue_remote_event(const ctrl_event_t *ev);
 esp_err_t deck_core_publish_loaded_track(uint8_t deck,
                                          uint32_t media_generation,
                                          uint32_t track_key,
+                                         uint8_t source_slot,
                                          uint16_t bpm,
                                          uint32_t duration_ms,
                                          const struct anlz_metadata *anlz);
 esp_err_t deck_core_clear_loaded_track(uint8_t deck,
                                        uint32_t media_generation);
 esp_err_t deck_core_clear_loaded_tracks(uint32_t media_generation);
+/* Clear only decks whose loaded track came from `source_slot`. Does not raise
+ * the global media floor, so a deck playing from another stick is untouched. */
+esp_err_t deck_core_clear_loaded_tracks_for_source(uint8_t source_slot,
+                                                   uint32_t media_generation);
 bool deck_core_get_loaded_track(uint8_t deck,
                                 deck_loaded_track_summary_t *out);
 

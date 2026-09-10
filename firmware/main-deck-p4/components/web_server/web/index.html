@@ -201,6 +201,9 @@
                 <input type="text" id="search-input"
                        placeholder="Search collection..."
                        oninput="filterLibrary()">
+                <select id="source-filter" onchange="filterLibrary()">
+                    <option>ALL</option>
+                </select>
             </div>
             <div class="library-container">
                 <table class="library-table">

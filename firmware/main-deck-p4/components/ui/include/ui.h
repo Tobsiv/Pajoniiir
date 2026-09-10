@@ -15,6 +15,7 @@ void      ui_update(void);   // call from LVGL timer task with current deck_stat
 void      ui_refresh_library(void);   // rebuild LIBRARY tab after USB (re)mount; takes the LVGL lock
 void      ui_trigger_library_refresh(void); // thread-safe trigger for main LVGL thread
 void      ui_notify_usb_removed(void); // thread-safe notification from USB storage task
+void      ui_notify_usb_source_removed(uint8_t source_slot);
 bool      ui_is_library_active(void);
 bool      ui_is_overview_active(void);
 esp_err_t ui_show_library(void);
