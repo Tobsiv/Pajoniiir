@@ -1,10 +1,16 @@
 # ESP32-P4 Pinout Inventory for JC4880P443C_I_W
 
-Documentation status: active P4 pin inventory, reviewed 2026-07-13. Keep it in
-sync with `docs/HARDWARE_WIRING.md` before enclosure installation.
+Documentation status: active P4 pin inventory. Keep it in sync with
+`docs/HARDWARE_WIRING.md` before enclosure installation.
 
 This file is the source of truth for P4-side peripheral wiring.
 The retired S3 pinout is available only through Git history.
+
+> On `refactor/p4-single-usb-host` the retired monitor-link pins GPIO32/34/35
+> now carry the **second PCM5102A (CUE / headphones, I2S0)** and GPIO28/29 carry
+> the **UART serial-MIDI controller link**. The live pin table in
+> `CLAUDE.md` (Board Pin Reference) is authoritative; the JP1 candidate tables
+> further down predate this and are kept as bench history.
 
 ## Occupied P4 pins in current firmware
 
@@ -14,12 +20,20 @@ The retired S3 pinout is available only through Git history.
 | GPIO23 | LCD backlight PWM | `BSP_LCD_BL_GPIO` | Forbidden |
 | GPIO7 | Shared I2C SDA | `BSP_I2C_SDA_GPIO` | Forbidden |
 | GPIO8 | Shared I2C SCL | `BSP_I2C_SCL_GPIO` | Forbidden |
-| GPIO13 | ES8311 I2S MCLK | `BSP_I2S_MCLK_GPIO` | Forbidden |
-| GPIO12 | ES8311 I2S BCLK | `BSP_I2S_BCLK_GPIO` | Forbidden |
-| GPIO10 | ES8311 I2S WS/LRCK | `BSP_I2S_WS_GPIO` | Forbidden |
-| GPIO9 | ES8311 I2S DOUT | `BSP_I2S_DOUT_GPIO` | Forbidden |
-| GPIO48 | ES8311 I2S DIN | `BSP_I2S_DIN_GPIO` | Forbidden |
-| GPIO11 | Speaker PA enable | `BSP_AUDIO_PA_GPIO` | Forbidden |
+| GPIO13 | ES8311 I2S MCLK (dev boards only) | `BSP_I2S_MCLK_GPIO` | Forbidden |
+| GPIO12 | ES8311 I2S BCLK (dev boards only) | `BSP_I2S_BCLK_GPIO` | Forbidden |
+| GPIO10 | ES8311 I2S WS/LRCK (dev boards only) | `BSP_I2S_WS_GPIO` | Forbidden |
+| GPIO9 | ES8311 I2S DOUT (dev boards only) | `BSP_I2S_DOUT_GPIO` | Forbidden |
+| GPIO48 | ES8311 I2S DIN (dev boards only) | `BSP_I2S_DIN_GPIO` | Forbidden |
+| GPIO11 | Speaker PA enable (retired) | `BSP_AUDIO_PA_GPIO` | Forbidden |
+| GPIO50 | PCM5102A MAIN I2S1 BCLK | `BSP_PCM5102_BCLK_GPIO` | In use |
+| GPIO52 | PCM5102A MAIN I2S1 WS/LRCK | `BSP_PCM5102_WS_GPIO` | In use |
+| GPIO51 | PCM5102A MAIN I2S1 DOUT | `BSP_PCM5102_DOUT_GPIO` | In use |
+| GPIO32 | PCM5102A CUE I2S0 BCLK | `BSP_PCM5102_CUE_BCLK_GPIO` | In use |
+| GPIO34 | PCM5102A CUE I2S0 WS/LRCK | `BSP_PCM5102_CUE_WS_GPIO` | In use |
+| GPIO35 | PCM5102A CUE I2S0 DOUT | `BSP_PCM5102_CUE_DOUT_GPIO` | In use |
+| GPIO28 | UART serial-MIDI link RX (controller → P4) | `CONFIG_MIDI_UART_LINK_RX_GPIO` | Forbidden |
+| GPIO29 | UART serial-MIDI link TX (P4 → controller LEDs) | `CONFIG_MIDI_UART_LINK_TX_GPIO` | Forbidden |
 | GPIO39 | SDMMC D0 | `slot_config.d0` | Forbidden |
 | GPIO40 | SDMMC D1 | `slot_config.d1` | Forbidden |
 | GPIO41 | SDMMC D2 | `slot_config.d2` | Forbidden |

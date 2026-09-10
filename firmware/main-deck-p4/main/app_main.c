@@ -21,7 +21,7 @@
 #if CONFIG_CONTROLLER_PROFILE_MANAGER
 #include "controller_profile_manager.h"
 #endif
-#include "p4_local_controller.h"
+#include "midi_uart_link.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
@@ -265,8 +265,14 @@ static bool on_recording_toggle(bool enable)
 #endif  /* CONFIG_AUDIO_RECORDER_ENABLED */
 
 // Called from the USB storage task when the Rekordbox drive mounts/unmounts.
-static void on_usb_storage_event(bool mounted)
+// usb_storage can mount several sticks at once; the library reads slot 0 (`/usb`).
+static void on_usb_storage_event(const usb_storage_mount_event_t *event)
 {
+    if (!event || event->index != 0u) {
+        return;
+    }
+    const bool mounted = event->mounted;
+
     if (mounted) {
         service_log_note(SERVICE_LOG_USB_MOUNTED, SERVICE_LOG_INFO, "rekordbox drive");
         esp_err_t rc = ESP_FAIL;
@@ -288,7 +294,7 @@ static void on_usb_storage_event(bool mounted)
             service_log_event(SERVICE_LOG_LIBRARY_LOAD_FAILED, SERVICE_LOG_WARN,
                               1u, (uint32_t)rc, 0u, 0u, 0u, esp_err_to_name(rc));
         }
-        ui_trigger_library_refresh();            // safely schedule table repopulation in the LVGL task context
+        ui_trigger_library_refresh();            // repopulate the table in the LVGL task context
     } else {
         ESP_LOGW(TAG, "USB drive removed");
         service_log_note(SERVICE_LOG_USB_UNMOUNTED, SERVICE_LOG_INFO, "drive removed");
@@ -422,6 +428,10 @@ void app_main(void)
     }
     app_settings_t settings = app_settings_get();
     audio_engine_set_cue_mode(settings.cue_mode);
+    /* The headphone/CUE DAC (second PCM5102A on I2S0, or the ES8311 monitor on a
+     * dev board) monitors the PFL'd deck(s). Without this the headphone mix
+     * defaults to master-only and PFL is inaudible. */
+    audio_engine_set_headphone_mode(AUDIO_HEADPHONE_MODE_CUE_MONO);
     audio_engine_set_master_trim(ui_settings_master_trim_gain(settings.master_trim_preset));
 
     // ── Authoritative deck state ─────────────────────────────────────────────
@@ -460,7 +470,17 @@ void app_main(void)
     // Starts the host + MSC stack; when a drive is plugged into the HS USB-C
     // port it mounts at /usb and on_usb_storage_event() loads the library.
     ESP_ERROR_CHECK(usb_storage_init(on_usb_storage_event));
-    ESP_ERROR_CHECK(p4_local_controller_start());
+
+    // Serial-MIDI controller link (external MCU over UART). Owns the controller
+    // runtime lifecycle and feeds controller_runtime_handle_midi().
+#if CONFIG_MIDI_UART_LINK_ENABLED
+    {
+        esp_err_t midi_rc = midi_uart_link_start();
+        if (midi_rc != ESP_OK) {
+            ESP_LOGW(TAG, "midi_uart_link_start: %s", esp_err_to_name(midi_rc));
+        }
+    }
+#endif
 
     ESP_LOGI(TAG, "all subsystems ready — P4-only deck waiting for direct controller events");
     ESP_ERROR_CHECK(firmware_health_mark_ready());

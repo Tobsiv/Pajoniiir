@@ -1,0 +1,38 @@
+menu "Serial MIDI controller link"
+
+config MIDI_UART_LINK_ENABLED
+    bool "Receive controller MIDI over UART"
+    default y
+    help
+        Starts a UART receiver that parses a raw MIDI 1.0 byte stream from an
+        external controller MCU and injects it into the controller runtime
+        (controller_runtime_handle_midi). Replaces the retired ESP32-S3
+        control-link bridge for the standalone product.
+
+config MIDI_UART_LINK_PORT
+    int "UART port number"
+    default 1
+    range 1 2
+    depends on MIDI_UART_LINK_ENABLED
+    help
+        UART peripheral index. 0 is the console; 1 uses the free JP1 pins.
+
+config MIDI_UART_LINK_RX_GPIO
+    int "RX GPIO (controller TX -> P4)"
+    default 28
+    depends on MIDI_UART_LINK_ENABLED
+
+config MIDI_UART_LINK_TX_GPIO
+    int "TX GPIO (P4 -> controller, LED feedback)"
+    default 29
+    depends on MIDI_UART_LINK_ENABLED
+
+config MIDI_UART_LINK_BAUD
+    int "Baud rate"
+    default 19200
+    depends on MIDI_UART_LINK_ENABLED
+    help
+        19200 8N1 is the first bring-up target (ATmega32U4 @ 8 MHz has ~0.16%
+        error there). Standard serial-MIDI is 31250; both are supported.
+
+endmenu

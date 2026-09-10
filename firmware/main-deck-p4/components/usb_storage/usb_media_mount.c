@@ -370,10 +370,19 @@ static bool candidate_effective_sector_count(const usb_media_candidate_t *candid
         return available > 0u;
     }
 
-    if (candidate->sector_count == 0u || candidate->sector_count > available) {
+    if (candidate->sector_count == 0u) {
         return false;
     }
-
+    /*
+    * Some USB drives report a partition that extends one or a few
+    * sectors beyond the actual device capacity. FatFs only needs
+    * the addressable portion of the partition, so clamp it to the
+    * physical device boundary.
+    */
+    if (candidate->sector_count > available) {
+        *out_sector_count = available;
+        return available > 0u;
+    }
     *out_sector_count = candidate->sector_count;
     return true;
 }

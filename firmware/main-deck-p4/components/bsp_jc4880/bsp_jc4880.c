@@ -43,13 +43,16 @@ static const char *TAG = "bsp";
 #define BSP_I2C_SDA_GPIO        GPIO_NUM_7
 #define BSP_I2C_SCL_GPIO        GPIO_NUM_8
 
-// ── Audio: ES8311 codec + I2S (pins from JC4880 vendor BSP) ──────────────────
+// ── Audio: ES8311 codec + I2S (dev-only monitor path; pins from vendor BSP) ──
+//    ES8311 is not populated on the product board — CONFIG_BSP_ES8311_MONITOR
+//    stays off there. The product CUE/headphone output is a second PCM5102A on
+//    the same I2S unit 0 (BSP_PCM5102_CUE_* below), mutually exclusive with this.
 #define BSP_I2S_NUM             I2S_NUM_0
 #define BSP_I2S_MCLK_GPIO       GPIO_NUM_13
 #define BSP_I2S_BCLK_GPIO       GPIO_NUM_12
 #define BSP_I2S_WS_GPIO         GPIO_NUM_10
-#define BSP_I2S_DOUT_GPIO       GPIO_NUM_9    // ESP → codec DAC
-#define BSP_I2S_DIN_GPIO        GPIO_NUM_48   // codec ADC → ESP (mic, unused for playback)
+#define BSP_I2S_DOUT_GPIO       GPIO_NUM_9     // ESP → codec DAC
+#define BSP_I2S_DIN_GPIO        GPIO_NUM_48    // codec ADC → ESP (mic, unused for playback)
 #define BSP_AUDIO_PA_GPIO       GPIO_NUM_11   // power-amp enable
 
 #if CONFIG_BSP_PCM5102A_MAIN_OUT && !CONFIG_BSP_ES8311_MONITOR
@@ -64,6 +67,14 @@ static const char *TAG = "bsp";
 #define BSP_PCM5102_WS_GPIO        GPIO_NUM_52
 #define BSP_PCM5102_DOUT_GPIO      GPIO_NUM_51
 #define BSP_PCM5102_MCLK_GPIO      I2S_GPIO_UNUSED
+
+// ── CUE / headphone Out: second PCM5102A on I2S unit 0 (JP1 pins) ───────────
+//    Product path only (built when CONFIG_BSP_ES8311_MONITOR is off).
+#define BSP_PCM5102_CUE_I2S_NUM    I2S_NUM_0
+#define BSP_PCM5102_CUE_BCLK_GPIO  GPIO_NUM_32
+#define BSP_PCM5102_CUE_WS_GPIO    GPIO_NUM_34
+#define BSP_PCM5102_CUE_DOUT_GPIO  GPIO_NUM_35
+#define BSP_PCM5102_CUE_MCLK_GPIO  I2S_GPIO_UNUSED
 
 // Vendor P4 function board BSP powers the uSD slot through on-chip LDO channel 4.
 #define BSP_SD_LDO_CHAN         4
@@ -118,6 +129,10 @@ static i2s_chan_handle_t        s_i2s_tx   = NULL;
 #endif
 static i2s_chan_handle_t        s_i2s_tx_pcm5102 = NULL;
 static bool                     s_i2s_tx_pcm5102_enabled = false;
+#if !CONFIG_BSP_ES8311_MONITOR
+static i2s_chan_handle_t        s_i2s_tx_pcm5102_cue = NULL;
+static bool                     s_i2s_tx_pcm5102_cue_enabled = false;
+#endif
 static esp_codec_dev_handle_t   s_codec    = NULL;
 static bsp_audio_out_t          s_audio_out = BSP_AUDIO_OUT_RCA;
 static bool                     s_audio_pa_gpio_ready = false;
@@ -371,6 +386,15 @@ i2s_chan_handle_t bsp_audio_get_main_i2s_tx(void)
     return s_i2s_tx_pcm5102;
 }
 
+i2s_chan_handle_t bsp_audio_get_cue_i2s_tx(void)
+{
+#if !CONFIG_BSP_ES8311_MONITOR
+    return s_i2s_tx_pcm5102_cue;
+#else
+    return NULL;
+#endif
+}
+
 static esp_err_t bsp_audio_pa_gpio_init_once(void)
 {
     if (s_audio_pa_gpio_ready) {
@@ -438,6 +462,44 @@ static esp_err_t bsp_audio_init_i2s_pcm5102(void)
     return ESP_OK;
 }
 
+#if !CONFIG_BSP_ES8311_MONITOR
+static esp_err_t bsp_audio_init_i2s_pcm5102_cue(void)
+{
+    if (s_i2s_tx_pcm5102_cue) {
+        return ESP_OK;
+    }
+
+    i2s_chan_config_t chan_cfg =
+        I2S_CHANNEL_DEFAULT_CONFIG(BSP_PCM5102_CUE_I2S_NUM, I2S_ROLE_MASTER);
+    chan_cfg.auto_clear = true;
+    ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &s_i2s_tx_pcm5102_cue, NULL),
+                        TAG, "pcm5102 cue i2s_new_channel failed");
+
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(44100),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+                                                       I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = BSP_PCM5102_CUE_MCLK_GPIO,
+            .bclk = BSP_PCM5102_CUE_BCLK_GPIO,
+            .ws = BSP_PCM5102_CUE_WS_GPIO,
+            .dout = BSP_PCM5102_CUE_DOUT_GPIO,
+            .din = I2S_GPIO_UNUSED,
+            .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
+        },
+    };
+    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_i2s_tx_pcm5102_cue, &std_cfg),
+                        TAG, "pcm5102 cue i2s std init failed");
+    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_i2s_tx_pcm5102_cue),
+                        TAG, "pcm5102 cue i2s enable failed");
+    s_i2s_tx_pcm5102_cue_enabled = true;
+    ESP_LOGI(TAG, "PCM5102A cue out ready: BCLK=%d WS=%d DOUT=%d",
+             BSP_PCM5102_CUE_BCLK_GPIO, BSP_PCM5102_CUE_WS_GPIO,
+             BSP_PCM5102_CUE_DOUT_GPIO);
+    return ESP_OK;
+}
+#endif
+
 esp_err_t bsp_audio_init(void)
 {
     ESP_RETURN_ON_ERROR(bsp_audio_force_safe_boot_state(), TAG,
@@ -445,10 +507,11 @@ esp_err_t bsp_audio_init(void)
     ESP_RETURN_ON_ERROR(bsp_i2c_bus_init(), TAG, "I2C bus init failed");
 
 #if !CONFIG_BSP_ES8311_MONITOR
-    /* ES8311 monitor disabled: only bring up the PCM5102A MAIN OUT DAC.
-       FLX4 cue/headphones use direct USB Audio from P4. */
-    ESP_RETURN_ON_ERROR(bsp_audio_init_i2s_pcm5102(), TAG, "PCM5102A init failed");
-    ESP_LOGI(TAG, "ES8311 monitor disabled; FLX4 cue uses direct USB Audio");
+    /* ES8311 monitor disabled (product): bring up both PCM5102A DACs —
+       MAIN (RCA) on I2S1 and CUE/headphones on I2S0. */
+    ESP_RETURN_ON_ERROR(bsp_audio_init_i2s_pcm5102(), TAG, "PCM5102A main init failed");
+    ESP_RETURN_ON_ERROR(bsp_audio_init_i2s_pcm5102_cue(), TAG, "PCM5102A cue init failed");
+    ESP_LOGI(TAG, "ES8311 monitor disabled; MAIN + CUE on dual PCM5102A");
     return ESP_OK;
 #else
     if (s_codec && s_i2s_tx) {
@@ -568,7 +631,15 @@ esp_err_t bsp_audio_set_monitor_route(bsp_monitor_route_t route)
 {
     switch (route) {
     case BSP_MONITOR_ROUTE_HEADPHONES:
-        ESP_RETURN_ON_ERROR(bsp_audio_set_speaker_pa_enabled(false), TAG, "speaker PA off failed");
+#if BSP_SPEAKER_ROUTE_RETIRED
+        /* Product config: CUE/headphones are the second PCM5102A on I2S0 — a
+         * self-powered DAC, no class-D amp in the path. Keep GPIO11 low. */
+        (void)bsp_audio_set_speaker_pa_enabled(false);
+#else
+        /* ES8311 dev monitor: the onboard 3.5 mm jack sits behind the class-D
+         * amp (GPIO11), so it must be enabled to hear anything on the jack. */
+        ESP_RETURN_ON_ERROR(bsp_audio_set_speaker_pa_enabled(true), TAG, "speaker PA on failed");
+#endif
         s_monitor_route = route;
         ESP_LOGI(TAG, "monitor route → headphones");
         return ESP_OK;
@@ -646,6 +717,43 @@ esp_err_t bsp_audio_main_i2s_abort_write(void)
     if (!s_i2s_tx_pcm5102_enabled) return ESP_OK;
     esp_err_t rc = i2s_channel_disable(s_i2s_tx_pcm5102);
     if (rc == ESP_OK) s_i2s_tx_pcm5102_enabled = false;
+    return rc;
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+esp_err_t bsp_audio_cue_i2s_set_sample_rate(uint32_t sample_rate)
+{
+#if !CONFIG_BSP_ES8311_MONITOR
+    if (!s_i2s_tx_pcm5102_cue || sample_rate == 0u) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_i2s_tx_pcm5102_cue_enabled) {
+        ESP_RETURN_ON_ERROR(i2s_channel_disable(s_i2s_tx_pcm5102_cue), TAG,
+                            "pcm5102 cue disable failed");
+        s_i2s_tx_pcm5102_cue_enabled = false;
+    }
+    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
+    ESP_RETURN_ON_ERROR(i2s_channel_reconfig_std_clock(s_i2s_tx_pcm5102_cue, &clk_cfg),
+                        TAG, "pcm5102 cue clock reconfig failed");
+    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_i2s_tx_pcm5102_cue), TAG,
+                        "pcm5102 cue enable failed");
+    s_i2s_tx_pcm5102_cue_enabled = true;
+    return ESP_OK;
+#else
+    (void)sample_rate;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+esp_err_t bsp_audio_cue_i2s_abort_write(void)
+{
+#if !CONFIG_BSP_ES8311_MONITOR
+    if (!s_i2s_tx_pcm5102_cue) return ESP_ERR_INVALID_STATE;
+    if (!s_i2s_tx_pcm5102_cue_enabled) return ESP_OK;
+    esp_err_t rc = i2s_channel_disable(s_i2s_tx_pcm5102_cue);
+    if (rc == ESP_OK) s_i2s_tx_pcm5102_cue_enabled = false;
     return rc;
 #else
     return ESP_ERR_NOT_SUPPORTED;

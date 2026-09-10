@@ -1,15 +1,24 @@
 # Pajoniiir Documentation
 
-Complete documentation index, updated 2026-08-22. Start with
+Complete documentation index. Start with
 [`DOCUMENTATION_STATUS.md`](DOCUMENTATION_STATUS.md) to understand current
 scope, source-of-truth precedence, the installed baseline and the latest fully
 accepted hardware baseline.
+
+> [!IMPORTANT]
+> On the `refactor/p4-single-usb-host` branch the P4 is a standalone controller:
+> a single USB host for media only, the DDJ-FLX4 on a UART serial-MIDI link, and
+> two PCM5102A DACs (MAIN + cue). Many documents below still describe the older
+> `feat/p4-dual-usb-host` design where the P4 hosted the FLX4 over USB1. For this
+> branch, [`../firmware/main-deck-p4/CLAUDE.md`](../firmware/main-deck-p4/CLAUDE.md)
+> is the current source of truth; the `docs/` records are kept as design and
+> validation history.
 
 ## Current product documents
 
 - [`DOCUMENTATION_STATUS.md`](DOCUMENTATION_STATUS.md) — audit baseline, source-of-truth order and remaining scope.
 - [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) — product shape and verified port status.
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — FLX4/S3/P4 ownership and data flow.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — FLX4/P4 ownership and data flow (predates the single-USB-host / UART-MIDI rework).
 - [`CONTROL_LINK_PROTOCOL.md`](CONTROL_LINK_PROTOCOL.md) — fixed `0xA5` events and `0xA6` bulk/profile/status transport.
 - [`CONTROLLER_PROFILE_SCHEMA.md`](CONTROLLER_PROFILE_SCHEMA.md) — JSON and compiled S3 profile format.
 - [`DDJ_FLX4_MIDI_MAP.md`](DDJ_FLX4_MIDI_MAP.md) — MIDI addresses, semantics and hardware-acceptance ledger.

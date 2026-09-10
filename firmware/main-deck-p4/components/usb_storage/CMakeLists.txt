@@ -1,12 +1,12 @@
 idf_component_register(
-    # The P4-only product always uses the shared dual-controller Host Library
-    # owner and restricts storage recovery to USB0.
-    SRCS "usb_storage_shared.c"
+    # Single USB host: usb_storage.c installs and owns the Host Library directly
+    # (released espressif/usb + usb_host_msc, no dual-root manager).
+    SRCS "usb_storage.c"
          "usb_storage_session.c" "usb_storage_recovery.c"
          "usb_media_partition.c" "usb_media_mount.c"
          "usb_dwc_hal_compat.c"
     INCLUDE_DIRS "include"
-    REQUIRES log usb usb_host_msc fatfs media_io_gate hal usb_host_manager
+    REQUIRES log usb usb_host_msc fatfs media_io_gate hal
     WHOLE_ARCHIVE
 )
 

@@ -57,8 +57,20 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 # ── USB host (Rekordbox media drive on the HS USB-C port) ────────────────────
 # Allow drives presented behind an internal hub (matches the IDF P4 MSC example).
 CONFIG_USB_HOST_HUBS_SUPPORTED=y
+# Hot re-plug of a stick into a hub downstream port can fail the first device
+# descriptor (contact bounce + VBUS inrush): "EXT_PORT: PortN disabled, reset
+# attempts=1". The single reset attempt is a fixed experimental default we cannot
+# raise from here, so give the electricals more time instead: hold enumeration
+# off until VBUS on the downstream port has had 100 ms to settle, and lengthen
+# the post-reset recovery window before the first control transfer.
+CONFIG_USB_HOST_EXT_PORT_RESET_RECOVERY_DELAY_MS=50
+CONFIG_USB_HOST_EXT_PORT_CUSTOM_POWER_ON_DELAY_ENABLE=y
+CONFIG_USB_HOST_EXT_PORT_CUSTOM_POWER_ON_DELAY_MS=100
 
 # ── FATFS ─────────────────────────────────────────────────────────────────────
+# Volumes: /sd (SDMMC) + up to USB_STORAGE_MAX_DEVICES USB sticks mounted at
+# once (via a hub). Default of 2 only covers /sd + one stick.
+CONFIG_FATFS_VOLUME_COUNT=4
 # Long filename support is OFF by default (8.3 only) → Rekordbox paths like
 # "rekordbox/export.pdb" and "Contents/.../*.mp3" can't be opened. Enable LFN.
 CONFIG_FATFS_LFN_HEAP=y
@@ -118,10 +130,10 @@ CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCP_SACK_OUT=y
 
-# ── P4-only direct controller/audio product ──────────────────────────────────
-# One shared Host Library owns USB0 storage and USB1 FLX4 MIDI/UAC. MAIN uses
-# PCM5102A; CUE/headphones are sent directly over FLX4 USB Audio.
-CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=512
+# ── P4-only product ─────────────────────────────────────────────────────────
+# Single USB host owns the Rekordbox media drive (released espressif/usb +
+# usb_host_msc). The controller comes in over UART (midi_uart_link). MAIN audio
+# is PCM5102A on I2S1; CUE/headphones a second PCM5102A on I2S0.
 CONFIG_BSP_PCM5102A_MAIN_OUT=y
 # CONFIG_BSP_ES8311_MONITOR is not set
 CONFIG_LV_FONT_MONTSERRAT_20=y
@@ -133,10 +145,10 @@ CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=8
 CONFIG_ESP_COREDUMP_LOGS=n
 CONFIG_ESP_TASK_WDT_PANIC=y
 
-# Optional ANLZ cache writes remain disabled until the dual-USB power/VBUS path
-# passes brownout acceptance. Existing cache entries remain readable.
+# Optional ANLZ cache writes remain disabled pending microSD fault-injection
+# acceptance. Existing cache entries remain readable.
 # CONFIG_LIBRARY_ANLZ_CACHE_WRITE is not set
-# Surface direct USB-controller INFO diagnostics (default runtime log level is WARN).
+# Keep INFO-level diagnostics available (default runtime log level is WARN).
 CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
 
 # ── Master recorder release policy ───────────────────────────────────────────

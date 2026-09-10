@@ -94,3 +94,9 @@ esp_err_t bsp_audio_main_i2s_set_sample_rate(uint32_t sample_rate);
 /* Disable the PCM5102 TX channel so a blocked bounded write wakes during STOP.
  * The next set_sample_rate call re-enables the channel. */
 esp_err_t bsp_audio_main_i2s_abort_write(void);
+
+// Second PCM5102A on I2S unit 0 — CUE / headphone output. Non-NULL only in the
+// product config (CONFIG_BSP_ES8311_MONITOR off) after bsp_audio_init() succeeds.
+i2s_chan_handle_t bsp_audio_get_cue_i2s_tx(void);
+esp_err_t bsp_audio_cue_i2s_set_sample_rate(uint32_t sample_rate);
+esp_err_t bsp_audio_cue_i2s_abort_write(void);

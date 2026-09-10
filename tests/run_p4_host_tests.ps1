@@ -852,119 +852,55 @@ Assert-FileContains `
     )
 
 Assert-FileContains `
-    -Name "p4 status exposes USB1 probe diagnostics" `
+    -Name "p4 status exposes storage + serial-MIDI diagnostics" `
     -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/web_server/web_server.c") `
     -LiteralPatterns @(
         '\"p4_usb\"',
-        "usb_host_manager_get_diagnostics",
-        "controller_usb_host_get_diagnostics",
-        '\"last_probe_stage_name\"',
-        '\"last_parent_port\"'
+        "usb_storage_get_diagnostics",
+        "midi_uart_link_get_diagnostics",
+        '\"midi_uart\"'
     )
 
-Assert-FileContains `
-    -Name "p4 JC4880 Full-Speed connector selects PHY0 without burning eFuse" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_storage/usb_storage_shared.c") `
-    -LiteralPatterns @(
-        ".override_fs_phy_index = true",
-        ".fs_phy_index = 0u",
-        "do not burn USB_PHY_SEL"
-    )
-
-Assert-FileContains `
-    -Name "p4 USB host manager applies the requested Full-Speed PHY route" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_host_manager/usb_host_manager.c") `
-    -LiteralPatterns @(
-        "usb_wrap_ll_phy_select(&USB_WRAP, s_config.fs_phy_index)",
-        '"USB Full-Speed root routed to PHY%u"'
-    )
-
-Assert-FileContains `
-    -Name "p4 USB recovery only succeeds after indexed root power-on completes" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_host_manager/usb_host_manager.c") `
-    -LiteralPatterns @(
-        "RECOVERY_POWER_ON_TIMEOUT_MS",
-        "if (rc == ESP_OK)",
-        "if (rc != ESP_ERR_INVALID_STATE)",
-        '"USB%u recovery power-on timed out: %s"',
-        "return RECOVERY_CYCLE_FAILED;"
-    )
-
-Assert-FileContains `
-    -Name "p4 USB recovery atomically preserves an active per-root enumeration" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/cmake/apply_espressif_usb_idle_recovery_patch.cmake") `
-    -LiteralPatterns @(
-        "pajoniiir_hcd_port_power_off_if_disconnected",
-        "port->state == HCD_PORT_STATE_DISCONNECTED",
-        "port->flags.event_pending",
-        "ESP_ERR_NOT_FINISHED",
-        "usb_host_lib_power_off_root_port_if_idle_by_index",
-        "Could not replace all esp-usb HCD, Hub, and Host Library sources"
-    )
-
-Assert-FileContains `
-    -Name "p4 USB manager suppresses recovery once attach or enumeration is active" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_host_manager/usb_host_manager.c") `
-    -LiteralPatterns @(
-        "recovery_power_off_if_idle",
-        "RECOVERY_CYCLE_SUPPRESSED_ACTIVE",
-        '"USB%u recovery suppressed: attach/enumeration is active"',
-        "s_recovery_suppressed_active"
-    )
-
-Assert-FileContains `
-    -Name "p4 USB recovery resumes a prior half-completed power cycle" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_host_manager/usb_host_manager.c") `
-    -LiteralPatterns @(
-        "const bool powered_off_now = rc == ESP_OK",
-        "rc != ESP_OK && rc != ESP_ERR_INVALID_STATE",
-        '"USB%u recovery resumes from already-off root"',
-        "usb_host_manager_set_root_power_by_index(port, true)"
-    )
-
-Assert-FileContains `
-    -Name "p4 status exposes USB root recovery outcomes" `
+Assert-FileDoesNotContain `
+    -Name "p4 status no longer references the removed dual-USB controller stack" `
     -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/web_server/web_server.c") `
     -LiteralPatterns @(
-        '\"recovery_coalesced\"',
-        "host_diag.recovery_successes",
-        "host_diag.recovery_suppressed_active",
-        "host_diag.recovery_failures",
-        "host_diag.recovery_queue_drops"
+        "usb_host_manager_get_diagnostics",
+        "controller_usb_host_get_diagnostics",
+        "p4_local_controller_get_diagnostics"
     )
 
-# CMake source replacement cannot execute in the host harness, so pin both the
-# fail-closed integration hook and the accepted HS/FS FIFO values textually.
 Assert-FileContains `
-    -Name "p4 dual USB build applies a fail-closed per-controller FIFO layout" `
+    -Name "p4 single USB host uses released esp-usb components" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_storage/idf_component.yml") `
+    -LiteralPatterns @(
+        'espressif/usb:',
+        'version: "==1.5.0"',
+        'espressif/usb_host_msc:',
+        'version: "==1.2.0"'
+    )
+
+Assert-FileDoesNotContain `
+    -Name "p4 no longer forks or patches esp-usb" `
     -Path (Join-Path $RepoRoot "firmware/main-deck-p4/CMakeLists.txt") `
     -LiteralPatterns @(
         "apply_espressif_usb_fifo_patch.cmake",
-        "apply_espressif_usb_idle_recovery_patch.cmake"
+        "apply_espressif_usb_idle_recovery_patch.cmake",
+        "apply_usb_host_msc_teardown_patch.cmake"
     )
 
 Assert-FileContains `
-    -Name "p4 dual USB FIFO patch preserves bulk HS and periodic OUT FS capacity" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/cmake/apply_espressif_usb_fifo_patch.cmake") `
-    -LiteralPatterns @(
-        "idf_component_get_property(_pajoniiir_usb_dir usb COMPONENT_DIR)",
-        "port->fifo_config.nptx_fifo_lines = 256;",
-        "port->fifo_config.ptx_fifo_lines = 128;",
-        "port->fifo_config.nptx_fifo_lines = 20;",
-        "port->fifo_config.ptx_fifo_lines = 100;",
-        "_pajoniiir_upstream_at EQUAL -1",
-        "Could not replace esp-usb hcd_dwc.c"
-    )
+    -Name "p4 storage installs the Host Library directly (single host)" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_storage/CMakeLists.txt") `
+    -LiteralPatterns @('SRCS "usb_storage.c"')
+
+Assert-FileDoesNotContain `
+    -Name "p4 storage no longer delegates to a dual-root manager" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_storage/CMakeLists.txt") `
+    -LiteralPatterns @("usb_host_manager", "usb_storage_shared.c")
 
 Assert-FileContains `
-    -Name "p4 pins the esp-usb disconnect/recycle race fix" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_storage/idf_component.yml") `
-    -LiteralPatterns @(
-        'version: "cc65dc268f9fb6e89b8b3c6c9e94f5aa1dbb2ccb"'
-    )
-
-Assert-FileContains `
-    -Name "p4 dual-USB defaults keep a bounded flash coredump" `
+    -Name "p4 defaults keep a bounded flash coredump" `
     -Path (Join-Path $RepoRoot "firmware/main-deck-p4/sdkconfig.defaults") `
     -LiteralPatterns @(
         "CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y",
@@ -992,21 +928,6 @@ Assert-FileContains `
     -LiteralPatterns @("cpm_read_profile", "controller_profile_runtime_activate", "cpm_activate_bound_profile")
 
 Assert-FileContains `
-    -Name "p4 controller events and LED output stay local" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/p4_local_controller/p4_local_controller.c") `
-    -LiteralPatterns @("control_link_inject_semantic", "control_link_set_led_sink", "controller_led_runtime_send")
-
-Assert-FileContains `
-    -Name "p4 controller USB client remains scheduler-unpinned" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/p4_local_controller/p4_local_controller.c") `
-    -LiteralPatterns @(".task_core_id = tskNO_AFFINITY")
-
-Assert-FileDoesNotContain `
-    -Name "p4 controller USB client excludes the experimental CPU0 pin" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/p4_local_controller/p4_local_controller.c") `
-    -LiteralPatterns @("LOCAL_CONTROLLER_USB_TASK_CORE")
-
-Assert-FileContains `
     -Name "p4 active control-link component compiles only the local adapter" `
     -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/control_link/CMakeLists.txt") `
     -LiteralPatterns @('SRCS "control_link_local.c" "flx4_led_snapshot.c"')
@@ -1020,6 +941,27 @@ Assert-FileDoesNotContain `
     -Name "p4 active application has no monitor PCM component dependency" `
     -Path (Join-Path $RepoRoot "firmware/main-deck-p4/main/CMakeLists.txt") `
     -LiteralPatterns @("monitor_pcm_link")
+
+Assert-FileContains `
+    -Name "serial MIDI link owns the controller runtime and feeds it, not a new mapper" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/midi_uart_link/midi_uart_link.c") `
+    -LiteralPatterns @(
+        "controller_runtime_init(&runtime_cfg)",
+        "controller_runtime_handle_midi(&msg)",
+        "controller_runtime_set_builtin_flx4_enabled(true)",
+        "midi_stream_parser_push")
+
+Assert-FileContains `
+    -Name "serial MIDI link is the sole LED sink and speaks FLX4 notes on the UART" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/midi_uart_link/midi_uart_link.c") `
+    -LiteralPatterns @(
+        "control_link_set_led_sink(uart_led_sink, NULL);",
+        "flx4_led_midi_build_packet(led, state, deck, packet)")
+
+Assert-FileContains `
+    -Name "app_main starts the serial MIDI controller link" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/main/app_main.c") `
+    -LiteralPatterns @("midi_uart_link_start()")
 
 Assert-FileContains `
     -Name "OTA release packager emits only the P4 target" `
@@ -1971,18 +1913,6 @@ $tests = @(
         )
     },
     @{
-        Name = "controller_audio_resampler"
-        Dir = "tests/controller_audio_resampler"
-        Target = "test_controller_audio_resampler.exe"
-        Args = @(
-            "-Wall", "-Wextra", "-Wpedantic", "-Werror", "-std=c99",
-            "-I../../firmware/main-deck-p4/components/controller_usb_audio/include",
-            "-o", "test_controller_audio_resampler.exe",
-            "test_controller_audio_resampler.c",
-            "../../firmware/main-deck-p4/components/controller_usb_audio/controller_audio_resampler.c"
-        )
-    },
-    @{
         Name = "beat_jump"
         Dir = "tests/beat_jump"
         Target = "test_beat_jump.exe"
@@ -2606,12 +2536,22 @@ Assert-FileContains `
 Assert-FileContains `
     -Name "p4 USB teardown detaches sole-owner handles before destructive cleanup" `
     -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_storage/usb_storage.c") `
-    -LiteralPatterns @("usb_media_mount_t *released_mount = s_mount", "s_mount = NULL", "s_msc_dev = NULL", "usb_media_unmount(released_mount)", "msc_host_uninstall_device(released_handle)")
+    -LiteralPatterns @("usb_media_mount_t *released_mount = s_devs[slot].mount", "s_devs[slot].mount = NULL", "s_devs[slot].handle = NULL", "usb_media_unmount(released_mount)", "msc_host_uninstall_device(released_handle)")
 
 Assert-FileContains `
-    -Name "p4 USB MSC patch preserves callback ownership through hot-unplug teardown" `
-    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/cmake/apply_usb_host_msc_teardown_patch.cmake") `
-    -LiteralPatterns @("usb_host_transfer_free(dev->xfer)", "dev->xfer = NULL", "vSemaphoreDelete(dev->transfer_done)", "DEFAULT_XFER_SIZE   (8 * 1024)", "return ESP_ERR_INVALID_SIZE", "if (xfer == NULL)", "fail-closed source")
+    -Name "p4 USB storage mounts multiple sticks at deterministic slot paths" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_storage/usb_storage.c") `
+    -LiteralPatterns @("s_devs[USB_STORAGE_MAX_DEVICES]", "reconcile_slot(slot)", "free_slot_locked", "refresh_gate_availability")
+
+Assert-FileContains `
+    -Name "p4 USB root-port recovery stops once any device (hub included) is enumerated" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/components/usb_storage/usb_storage.c") `
+    -LiteralPatterns @("usb_host_lib_info(&lib_info)", "lib_info.num_devices > 0", "devices_connected() > 0 || bus_populated")
+
+Assert-FileContains `
+    -Name "p4 FATFS has room for /sd + multiple USB sticks" `
+    -Path (Join-Path $RepoRoot "firmware/main-deck-p4/sdkconfig.defaults") `
+    -LiteralPatterns @("CONFIG_FATFS_VOLUME_COUNT=4")
 
 Assert-FileContains `
     -Name "p4 USB media bounds every FatFS transfer by bytes, not sector count" `
@@ -2952,7 +2892,7 @@ Invoke-Step -Name "run firmware lifecycle regression" -WorkingDirectory $RepoRoo
 
 # Resolve the current PowerShell executable for both Windows PowerShell and pwsh.
 $HostShell = (Get-Process -Id $PID).Path
-foreach ($suite in @("controller_runtime", "controller_usb_host", "controller_led_runtime")) {
+foreach ($suite in @("controller_runtime", "midi_uart_link")) {
     Invoke-Step -Name "run $suite" -WorkingDirectory $RepoRoot -Executable $HostShell `
         -Arguments @("-NoProfile", "-File", (Join-Path $PSScriptRoot "$suite/run_tests.ps1"))
 }

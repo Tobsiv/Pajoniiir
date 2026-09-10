@@ -47,9 +47,6 @@
 #include "audio_scratch.h"
 #include "audio_resampler.h"
 #include "audio_smart_cfx.h"
-#if !defined(AUDIO_ENGINE_PC_TEST)
-#include "controller_usb_host.h"
-#endif
 
 #include <math.h>
 #if !defined(AUDIO_ENGINE_PC_TEST)
@@ -1271,6 +1268,7 @@ static void record_deck_peak(uint8_t deck, audio_mixer_frame_t frame)
 #if AE_FW
 static esp_codec_dev_handle_t s_codec       = NULL;  /* owned by bsp_jc4880 */
 static i2s_chan_handle_t      s_main_i2s_tx = NULL;  /* optional PCM5102A MAIN OUT */
+static i2s_chan_handle_t      s_cue_i2s_tx = NULL;   /* optional PCM5102A CUE OUT (I2S0) */
 /* Per-deck counting semaphore: each of a deck's tasks gives on exit. Per-deck
  * (not shared) so tearing down deck A never consumes the exit signals a
  * concurrent load of deck B is waiting on. */
@@ -1286,6 +1284,7 @@ static portMUX_TYPE           s_ring_flush_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool          s_output_codec_open = false;
 static uint32_t               s_output_sample_rate = 0;
 static audio_output_sink_stats_t s_main_sink_stats;
+static audio_output_sink_stats_t s_cue_sink_stats;
 static uint32_t               s_headphone_sink_errors;
 static uint32_t               s_output_sink_faults;
 /* The MP3 is preloaded into PSRAM once and decoded directly from the
@@ -3248,6 +3247,19 @@ static esp_err_t audio_output_service_open_codec(uint32_t sample_rate)
     }
 #endif
 
+    if (s_cue_i2s_tx) {
+        /* Second PCM5102A (CUE/headphones) runs at the same engine rate. A
+         * failure here is non-fatal: MAIN still plays, only cue monitoring is
+         * silent until the next LOAD. */
+        esp_err_t cue_rc = bsp_audio_cue_i2s_set_sample_rate(sample_rate);
+        if (cue_rc != ESP_OK) {
+            ESP_LOGW(TAG, "PCM5102A cue out rate %u Hz failed: %s",
+                     (unsigned)sample_rate, esp_err_to_name(cue_rc));
+        } else {
+            ESP_LOGI(TAG, "PCM5102A cue out open @ %u Hz", (unsigned)sample_rate);
+        }
+    }
+
     if (s_codec) {
         esp_codec_dev_sample_info_t fs = {
             .bits_per_sample = 16,
@@ -3311,6 +3323,21 @@ static esp_err_t audio_output_write_main(const int16_t *frames, size_t bytes)
     (void)bytes;
     return ESP_ERR_NOT_SUPPORTED;
 #endif
+}
+
+/* Second PCM5102A (CUE / headphones) on I2S0. MAIN paces the output loop, so the
+ * cue write only needs to keep up; a short timeout keeps a stalled cue DAC from
+ * blocking playback. Never fails the block. */
+static void audio_output_write_cue(const int16_t *frames, size_t bytes)
+{
+    if (!s_cue_i2s_tx) {
+        return;
+    }
+    TickType_t timeout_ticks = pdMS_TO_TICKS(20u);
+    if (timeout_ticks == 0u) timeout_ticks = 1u;
+    (void)audio_output_sink_write_all(
+        audio_output_main_i2s_write, s_cue_i2s_tx, frames, bytes,
+        (uint32_t)timeout_ticks, 2u, &s_cue_sink_stats);
 }
 
 static void audio_output_mark_sink_fault(esp_err_t main_rc, esp_err_t hp_rc)
@@ -3675,8 +3702,7 @@ static void ae_output_task(void *arg)
         }
         ae_wdt_trace(AUDIO_WDT_PHASE_MONITOR, 0u);
 #if !defined(AUDIO_ENGINE_PC_TEST)
-        (void)controller_usb_host_write_audio(
-            master_out, hp_out, AE_OUT_FRAMES, s_output_sample_rate);
+        audio_output_write_cue(hp_out, AE_OUT_FRAMES * 2 * sizeof(int16_t));
 #else
         (void)hp_out;
 #endif
@@ -3692,8 +3718,9 @@ static void ae_output_task(void *arg)
             ae_phase_note(AE_PH_MAIN, now - phase_mark);
             phase_mark = now;
         }
-        /* When ES8311 is disabled the loop paces on the PCM5102A blocking
-           write above; hp_out still reaches the FLX4 phones over the link. */
+        /* The loop paces on the PCM5102A MAIN blocking write above. hp_out has
+           already gone to the CUE PCM5102A (audio_output_write_cue); the ES8311
+           write below only runs on a dev board with the monitor codec fitted. */
         esp_err_t hp_rc = ESP_ERR_NOT_SUPPORTED;
         if (s_codec) {
             ae_wdt_trace(AUDIO_WDT_PHASE_CODEC, 0u);
@@ -3963,6 +3990,7 @@ esp_err_t audio_engine_init(void)
      * The I2S clock is configured per-track in audio_engine_load via codec_open. */
     s_codec = bsp_audio_get_codec_dev();
     s_main_i2s_tx = bsp_audio_get_main_i2s_tx();
+    s_cue_i2s_tx = bsp_audio_get_cue_i2s_tx();
     if (!s_codec && !s_main_i2s_tx) {
         ESP_LOGE(TAG, "audio_engine_init: no audio output ready (call bsp_audio_init first)");
         return ESP_ERR_INVALID_STATE;
@@ -5937,28 +5965,13 @@ void audio_engine_get_diagnostics_snapshot(audio_engine_diagnostics_snapshot_t *
 #endif
     limiter_stats_snapshot(&out_snapshot->limiter);
 #if AE_FW
-    controller_usb_host_audio_stats_t direct_stats = { 0 };
-    controller_usb_host_get_audio_stats(&direct_stats);
-    out_snapshot->usb_headphone_packet_failures = direct_stats.packet_failures;
-    out_snapshot->usb_headphone_packet_lost_frames = (uint32_t)direct_stats.packet_lost_frames;
-    if (direct_stats.streaming || direct_stats.submitted_blocks != 0u) {
-        out_snapshot->usb_headphone_submitted_blocks =
-            (uint32_t)direct_stats.submitted_blocks;
-        out_snapshot->usb_headphone_dropped_blocks =
-            (uint32_t)direct_stats.dropped_blocks;
-        out_snapshot->usb_headphone_submitted_frames =
-            (uint32_t)direct_stats.submitted_frames;
-        out_snapshot->usb_headphone_ring_queued_frames =
-            direct_stats.ring_queued_frames;
-        out_snapshot->usb_headphone_ring_capacity_frames =
-            direct_stats.ring_capacity_frames;
-        out_snapshot->usb_headphone_ring_high_water_frames =
-            direct_stats.ring_high_water_frames;
-        out_snapshot->usb_headphone_overflow_frames =
-            (uint32_t)direct_stats.overrun_frames;
-        out_snapshot->usb_headphone_underflow_frames =
-            (uint32_t)direct_stats.underrun_frames;
-    }
+    /* Cue/headphone output is a local I2S DAC now — the fields below stay zero
+       (kept in the struct for API stability) apart from the CUE sink write
+       stats. */
+    audio_output_sink_stats_t cue_stats = { 0 };
+    audio_output_sink_stats_snapshot(&s_cue_sink_stats, &cue_stats);
+    out_snapshot->usb_headphone_submitted_blocks = cue_stats.calls;
+    out_snapshot->usb_headphone_dropped_blocks = cue_stats.timeouts;
 #endif
     out_snapshot->usb_headphone_active_data_loss_flags =
         __atomic_load_n(&s_uac_active_data_loss_flags, __ATOMIC_ACQUIRE);

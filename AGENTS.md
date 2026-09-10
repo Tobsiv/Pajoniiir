@@ -13,15 +13,20 @@ je to prirodnije za firmware projekt.
 
 Cilj je standalone dual-deck DJ sustav:
 
-- Pioneer DDJ-FLX4 je operator surface.
-- ESP32-P4 JC4880P443C_I_W izravno hosta DDJ-FLX4 preko USB1 i autoritativni je
-  playback/UI/audio engine.
-- ESP32-S3 i inter-board UART/PCM veza uklonjeni su iz aktivnog proizvoda.
+- Pioneer DDJ-FLX4 (ili bilo koji MIDI kontroler) je operator surface.
+- Na grani `refactor/p4-single-usb-host` ESP32-P4 JC4880P443C_I_W ima **jedan USB
+  host samo za medije**; kontroler dolazi kao MIDI 1.0 bajt-stream preko UART-a
+  (`midi_uart_link`, GPIO28 RX / GPIO29 TX, 19200 8N1), a P4 je autoritativni
+  playback/UI/audio engine. CUE/slušalice idu na **drugi PCM5102A** (I2S0).
+- ESP32-S3, inter-board UART/PCM veza i FLX4-preko-USB1 uklonjeni su iz aktivnog
+  proizvoda. Ne vraćaj drugi `usb_host_install()` — Host Library je singleton
+  kojim upravlja `usb_storage.c`; više medija dolazi s huba, ne s druge jezgre.
 - Povijesni `0xA5`/`0xA6` control-link format smije ostati samo u jasno označenoj
   arhivskoj dokumentaciji; ne vraćaj ga u aktivni firmware bez izričitog zahtjeva.
 
-Trenutni `master` ima funkcionalan dual-deck FLX4 put, vinyl/scratch, Master
-Tempo, dualni MAIN/cue audio, Beat FX Filter/Echo/Flanger/Delay i P4 OTA.
+Firmware ima funkcionalan dual-deck FLX4 put, vinyl/scratch, Master Tempo,
+dualni MAIN/cue audio (dva PCM5102A), Beat FX Filter/Echo/Flanger/Delay,
+spajanje do tri USB sticka u jednu biblioteku i P4 OTA.
 Pull OTA koristi newer-only politiku, desetominutni offer TTL, provjeru
 channel size/SHA-256, `pajoniiir.local` i dinamički Host allow-list; lokalni
 potpisani push OTA ostaje servisni rollback put. Controller browse/load UI

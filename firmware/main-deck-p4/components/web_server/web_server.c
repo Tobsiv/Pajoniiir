@@ -25,9 +25,7 @@
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
 #include "esp_core_dump.h"
 #endif
-#include "controller_usb_host.h"
-#include "p4_local_controller.h"
-#include "usb_host_manager.h"
+#include "midi_uart_link.h"
 #include "usb_storage.h"
 #if CONFIG_CONTROLLER_PROFILE_MANAGER
 #include "controller_profile_manager.h"
@@ -221,24 +219,6 @@ static const char *controller_profile_state_name(controller_profile_transfer_sta
     }
 }
 #endif
-
-static const char *controller_usb_probe_stage_name(uint8_t stage)
-{
-    switch ((controller_usb_probe_stage_t)stage) {
-    case CONTROLLER_USB_PROBE_NONE:              return "none";
-    case CONTROLLER_USB_PROBE_OPEN:              return "open";
-    case CONTROLLER_USB_PROBE_DEVICE_INFO:       return "device_info";
-    case CONTROLLER_USB_PROBE_DEVICE_DESCRIPTOR: return "device_descriptor";
-    case CONTROLLER_USB_PROBE_CONFIG_DESCRIPTOR: return "config_descriptor";
-    case CONTROLLER_USB_PROBE_MIDI_DESCRIPTOR:   return "midi_descriptor";
-    case CONTROLLER_USB_PROBE_ALREADY_OWNED:     return "already_owned";
-    case CONTROLLER_USB_PROBE_INTERFACE_CLAIM:   return "interface_claim";
-    case CONTROLLER_USB_PROBE_TRANSFER_ALLOC:    return "transfer_alloc";
-    case CONTROLLER_USB_PROBE_IN_SUBMIT:         return "in_submit";
-    case CONTROLLER_USB_PROBE_READY:             return "ready";
-    default:                                     return "unknown";
-    }
-}
 
 static esp_err_t register_uri_or_stop(httpd_handle_t server, const httpd_uri_t *uri)
 {
@@ -1209,59 +1189,15 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         service_status.written, service_status.current_bytes,
         service_status.last_error);
 
-    char p4_usb_json[2048] = {0};
+    char p4_usb_json[1024] = {0};
     {
-        usb_host_manager_diagnostics_t host_diag = {0};
-        controller_usb_host_diagnostics_t controller_diag = {0};
-        p4_local_controller_diagnostics_t local_diag = {0};
         usb_storage_diagnostics_t storage_diag = {0};
-        usb_host_manager_get_diagnostics(&host_diag);
-        controller_usb_host_get_diagnostics(&controller_diag);
-        p4_local_controller_get_diagnostics(&local_diag);
+        midi_uart_link_diagnostics_t midi_diag = {0};
         usb_storage_get_diagnostics(&storage_diag);
+        midi_uart_link_get_diagnostics(&midi_diag);
         snprintf(
             p4_usb_json, sizeof(p4_usb_json),
             "\"p4_usb\":{"
-            "\"host\":{"
-            "\"ready\":%s,\"install_result\":%d,"
-            "\"install_result_name\":\"%s\","
-            "\"peripheral_map\":%u,\"root_power_mask\":%u,"
-            "\"fs_phy_override\":%s,\"fs_phy_index\":%u,"
-            "\"daemon_iterations\":%u,\"daemon_errors\":%u,"
-            "\"recovery_requests\":%u,\"recovery_coalesced\":%u,"
-            "\"recovery_successes\":%u,\"recovery_suppressed_active\":%u,"
-            "\"recovery_failures\":%u,"
-            "\"recovery_queue_drops\":%u},"
-            "\"topology\":{"
-            "\"observations\":%u,\"probe_failures\":%u,"
-            "\"last_result\":%d,\"last_result_name\":\"%s\","
-            "\"last_address\":%u,\"last_parent_port\":%u,"
-            "\"last_direct_root\":%s},"
-            "\"controller\":{"
-            "\"registered\":%s,\"connected\":%s,"
-            "\"accepting_midi_out\":%s,\"devices_probed\":%u,"
-            "\"descriptor_rejects\":%u,"
-            "\"midi_descriptor_rejects\":%u,"
-            "\"interface_claim_failures\":%u,"
-            "\"transfer_alloc_failures\":%u,"
-            "\"midi_connects\":%u,\"midi_disconnects\":%u,"
-            "\"midi_packets\":%u,\"midi_bytes\":%u,"
-            "\"probe_event_drops\":%u,\"recovery_requests\":%u,"
-            "\"fault_recovery_epochs\":%u,"
-            "\"last_probe_stage\":%u,"
-            "\"last_probe_stage_name\":\"%s\","
-            "\"last_probe_result\":%d,"
-            "\"last_probe_result_name\":\"%s\","
-            "\"last_probe_address\":%u,"
-            "\"last_vid\":\"0x%04X\",\"last_pid\":\"0x%04X\","
-            "\"last_config_total_length\":%u,"
-            "\"last_parent_port\":%u,\"last_direct_root\":%s},"
-            "\"runtime\":{"
-            "\"bootstrap_started\":%s,\"bootstrap_ready\":%s,"
-            "\"bootstrap_failures\":%u,\"last_bootstrap_error\":%d,"
-            "\"local_connected\":%s,"
-            "\"semantic_events\":%u,\"queue_failures\":%u,"
-            "\"profile_activations\":%u,\"profile_fallbacks\":%u},"
             "\"storage\":{"
             "\"desired_connected\":%s,\"mounted\":%s,"
             "\"connect_events\":%u,\"connect_accepted\":%u,"
@@ -1270,63 +1206,13 @@ static esp_err_t api_status_handler(httpd_req_t *req)
             "\"last_mount_result\":%d,\"last_mount_result_name\":\"%s\","
             "\"releases\":%u,"
             "\"last_unmount_result\":%d,\"last_unmount_result_name\":\"%s\","
-            "\"last_uninstall_result\":%d,\"last_uninstall_result_name\":\"%s\"}"
+            "\"last_uninstall_result\":%d,\"last_uninstall_result_name\":\"%s\"},"
+            "\"midi_uart\":{"
+            "\"runtime_bound\":%s,\"bytes_received\":%u,"
+            "\"messages_parsed\":%u,\"messages_mapped\":%u,"
+            "\"semantic_events\":%u,\"queue_failures\":%u,"
+            "\"led_messages_sent\":%u,\"uart_errors\":%u}"
             "}",
-            host_diag.ready ? "true" : "false",
-            (int)host_diag.install_result,
-            esp_err_to_name(host_diag.install_result),
-            host_diag.peripheral_map,
-            (unsigned)host_diag.root_power_requested_mask,
-            host_diag.fs_phy_override_requested ? "true" : "false",
-            (unsigned)host_diag.fs_phy_index,
-            (unsigned)host_diag.daemon_iterations,
-            (unsigned)host_diag.daemon_errors,
-            (unsigned)host_diag.recovery_requests,
-            (unsigned)host_diag.recovery_coalesced_requests,
-            (unsigned)host_diag.recovery_successes,
-            (unsigned)host_diag.recovery_suppressed_active,
-            (unsigned)host_diag.recovery_failures,
-            (unsigned)host_diag.recovery_queue_drops,
-            (unsigned)host_diag.topology_observations,
-            (unsigned)host_diag.topology_probe_failures,
-            (int)host_diag.last_topology_result,
-            esp_err_to_name((esp_err_t)host_diag.last_topology_result),
-            (unsigned)host_diag.last_topology_address,
-            (unsigned)host_diag.last_topology_parent_port,
-            host_diag.last_topology_direct_root ? "true" : "false",
-            controller_diag.registered ? "true" : "false",
-            controller_diag.connected ? "true" : "false",
-            controller_diag.accepting_midi_out ? "true" : "false",
-            (unsigned)controller_diag.devices_probed,
-            (unsigned)controller_diag.descriptor_rejects,
-            (unsigned)controller_diag.midi_descriptor_rejects,
-            (unsigned)controller_diag.interface_claim_failures,
-            (unsigned)controller_diag.transfer_alloc_failures,
-            (unsigned)controller_diag.midi_connects,
-            (unsigned)controller_diag.midi_disconnects,
-            (unsigned)controller_diag.midi_packets,
-            (unsigned)controller_diag.midi_bytes,
-            (unsigned)controller_diag.probe_event_drops,
-            (unsigned)controller_diag.recovery_requests,
-            (unsigned)controller_diag.fault_recovery_epochs,
-            (unsigned)controller_diag.last_probe_stage,
-            controller_usb_probe_stage_name(controller_diag.last_probe_stage),
-            (int)controller_diag.last_probe_result,
-            esp_err_to_name((esp_err_t)controller_diag.last_probe_result),
-            (unsigned)controller_diag.last_probe_address,
-            controller_diag.last_seen_vid, controller_diag.last_seen_pid,
-            (unsigned)controller_diag.last_config_total_length,
-            (unsigned)controller_diag.last_parent_port,
-            controller_diag.last_direct_root ? "true" : "false",
-            local_diag.bootstrap_started ? "true" : "false",
-            local_diag.bootstrap_ready ? "true" : "false",
-            (unsigned)local_diag.bootstrap_failures,
-            (int)local_diag.last_bootstrap_error,
-            local_diag.local_connected ? "true" : "false",
-            (unsigned)local_diag.local_semantic_events,
-            (unsigned)local_diag.local_queue_failures,
-            (unsigned)local_diag.profile_activations,
-            (unsigned)local_diag.profile_fallbacks,
             storage_diag.desired_connected ? "true" : "false",
             storage_diag.mounted ? "true" : "false",
             (unsigned)storage_diag.connect_events,
@@ -1341,7 +1227,15 @@ static esp_err_t api_status_handler(httpd_req_t *req)
             (int)storage_diag.last_unmount_result,
             esp_err_to_name(storage_diag.last_unmount_result),
             (int)storage_diag.last_uninstall_result,
-            esp_err_to_name(storage_diag.last_uninstall_result));
+            esp_err_to_name(storage_diag.last_uninstall_result),
+            midi_diag.runtime_bound ? "true" : "false",
+            (unsigned)midi_diag.bytes_received,
+            (unsigned)midi_diag.messages_parsed,
+            (unsigned)midi_diag.messages_mapped,
+            (unsigned)midi_diag.semantic_events,
+            (unsigned)midi_diag.queue_failures,
+            (unsigned)midi_diag.led_messages_sent,
+            (unsigned)midi_diag.uart_errors);
     }
 
     const size_t crash_dump_json_size = 1024u;

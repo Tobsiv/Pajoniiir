@@ -1,12 +1,16 @@
 # Pajoniiir P4 Main Deck Firmware — Claude Guide
 
 Documentation status: current ESP-IDF 6.0.2 P4-only developer guide, refreshed
-for `feat/p4-dual-usb-host` on 2026-08-27. The branch uses transactional media
-loading, strict ANLZ parsing, actor-owned deck snapshots, direct USB1 controller
-MIDI/audio, USB desired/current reconciliation, a shared Wi-Fi transition
-lease, a single real DPI framebuffer and a bounded compressed-audio page cache.
-The master-output recorder has software STOP/finalize safety coverage but remains
-release-disabled until physical microSD and power-loss fault injection passes.
+for `refactor/p4-single-usb-host` on 2026-09-09. The branch uses transactional
+media loading, strict ANLZ parsing, actor-owned deck snapshots, a **single USB
+host** for the media drive (released `espressif/usb 1.5.0` +
+`usb_host_msc 1.2.0` — no fork, no CMake patches), a **UART serial-MIDI
+controller link** (`midi_uart_link`) in place of the retired direct-USB1 FLX4
+path, dual PCM5102A audio (MAIN on I2S1, CUE/headphones on I2S0), a shared Wi-Fi
+transition lease, a single real DPI framebuffer and a bounded compressed-audio
+page cache. The master-output recorder has software STOP/finalize safety
+coverage but remains release-disabled until physical microSD and power-loss
+fault injection passes.
 
 Release line: the prefix moved from `RC1` to **`RC2`** on 2026-07-30 to mark the
 ESP-IDF 6.0.2 baseline; the annotated tag sits on `56905c89` and the clean
@@ -32,11 +36,24 @@ out at depth 1, so a CI build carries a bare commit hash as its version, not
 > ⚠️ **USB needs a root-port cycle after a software reset.** A drive already
 > attached across `esp_restart()` never connects on its own — the host waits for
 > a connection event that cannot occur — so before RC1-182 the library was empty
-> after every OTA until someone replugged the stick. `usb_storage` now installs
-> the host with `root_port_unpowered` and cycles `usb_host_lib_set_root_port_power()`,
-> retrying while nothing has connected. Do not "simplify" that back to a plain
-> `usb_host_install()`. Lengthening the port-off window is not the lever; the
+> after every OTA until someone replugged the stick. `usb_storage.c` installs
+> the host itself (`usb_host_install()` with `root_port_unpowered`) and cycles
+> `usb_host_lib_set_root_port_power()`, retrying while nothing has connected. Do
+> not "simplify" that away. Lengthening the port-off window is not the lever; the
 > repeat is. See `docs/bench-notes.md`.
+
+> ⚠️ **The USB host is single-root again.** The dual-root `usb_host_manager` +
+> forked/patched `esp-usb` + `controller_usb_host` / `controller_usb_audio`
+> stack was removed on `refactor/p4-single-usb-host`: it broke serial monitoring,
+> forced DFU-mode flashing and blocked external USB hubs. Controller input now
+> arrives as a raw MIDI 1.0 byte stream on a UART via `midi_uart_link` (default
+> GPIO28 RX / GPIO29 TX, 19200 8N1). The P4 no longer hosts USB-MIDI, so a
+> USB-only controller (the DDJ-FLX4 included) needs an external USB-MIDI-host
+> bridge MCU in front of the UART; `controller_runtime` keeps the built-in
+> DDJ-FLX4 map so a bridge forwarding the FLX4's raw MIDI needs no config. Do not
+> reintroduce a second `usb_host_install()` — the ESP-IDF Host Library is a
+> singleton and `usb_storage.c` owns it. Multiple media drives come from a hub on
+> the one root, not a second controller.
 
 > ⚠️ **`max_open_sockets` is 5.** With `lru_purge_enable` unset, five held
 > keep-alive sockets made the server refuse every new client — including
@@ -90,23 +107,23 @@ archived under `attic/*` tags.
 
 ESP32-P4 firmware for the Pajoniiir main-deck board (JC4880P443C_I_W).
 Responsible for authoritative dual-deck state, LVGL UI, media library,
-decode/mixer/DSP, direct FLX4 USB MIDI/audio, LED decisions, web service and P4
-OTA. No ESP32-S3 or inter-board UART/PCM link is required by the active image.
+decode/mixer/DSP, UART serial-MIDI controller input, LED decisions, web service
+and P4 OTA. No ESP32-S3 or inter-board PCM link is required by the active image.
 
 **Status:** Display, touch, USB media library (FAT32/exFAT on MBR/GPT), audio
-(PCM5102A I2S MAIN, MP3/WAV/FLAC), SDMMC mount, a single DPI framebuffer fed by the partial LVGL/PPA path, and the
-dual-deck P4 touchscreen path are operational on hardware. `deck_core` drives
-`audio_engine` through deck-aware APIs; the P4-local controller runtime maps
-USB1 FLX4 input into the same semantic event queue. The Overview
+(dual PCM5102A — MAIN I2S1, CUE I2S0, MP3/WAV/FLAC), SDMMC mount, a single DPI
+framebuffer fed by the partial LVGL/PPA path, and the dual-deck P4 touchscreen
+path are operational on hardware. `deck_core` drives `audio_engine` through
+deck-aware APIs; `midi_uart_link` owns the controller runtime and maps an
+incoming MIDI 1.0 byte stream into the same semantic event queue. The Overview
 waveform is feature-complete: both decks use the direct PPA overlay path with
 "Punchy" colour-waveform rendering, white transient tips, an active/armed loop
 region highlight, hot-cue markers on the large + mini waveforms, and a
 translucent played-progress highlight on the mini. The **ESP-Hosted Wi-Fi + web
-UI mobile controller** is re-enabled behind a Settings switch (default off). A
-2026-07-04 audit hardened thread-safety (atomics), load-failure abort, and the
-web status JSON. PCM5102A MAIN, FLX4 USB headphone cue, LED feedback, vinyl
-scratch and Master Tempo have recorded acceptance on the historical S3 path.
-The direct P4 path still requires the explicit dual-USB hardware rows.
+UI mobile controller** is re-enabled behind a Settings switch (default off).
+LED feedback, vinyl scratch and Master Tempo have recorded acceptance on the
+historical S3 path. The UART controller link and the second PCM5102A CUE DAC
+need their own hardware acceptance rows.
 
 P4 web OTA accepts only signed `main-deck-p4.ddjota` bundles. The common
 `ota_manifest` component verifies the embedded ECDSA P-256 manifest before
@@ -120,19 +137,22 @@ under repository-root `keys/` must never be copied into firmware or committed.
 
 | Component | Status | Description |
 |-----------|--------|-------------|
-| `control_link` | ✅ **P4-LOCAL** | transport-neutral semantic queue injection and direct LED sink; legacy UART sources are not compiled |
-| `deck_core` | ✅ **RUNNING ON HW** | state machine + drives `audio_engine` (play/pause/cue→seek/jog/pitch); `deck_core_queue_event()` for UI/local-controller sources |
+| `control_link` | ✅ **P4-LOCAL** | transport-neutral semantic queue injection and single LED sink; legacy UART/bulk sources are not compiled |
+| `midi_uart_link` | ✅ **P4-LOCAL** | owns `controller_runtime` (init + dispatch task); UART MIDI-1.0 byte-stream parser → `controller_runtime_handle_midi()`; the LED sink emits FLX4-shaped notes back over the UART TX. Kconfig: port/pins/baud (default UART1, GPIO28 RX / GPIO29 TX, 19200 8N1) |
+| `controller_runtime` | ✅ **P4-LOCAL** | MIDI → semantic-event mapping (built-in FLX4 map + dynamic profile map); also holds the pure `usb_midi_codec` (MIDI message type/parse) and `flx4_led_midi` (LED-id → note) helpers |
+| `deck_core` | ✅ **RUNNING ON HW** | state machine + drives `audio_engine` (play/pause/cue→seek/jog/pitch); `deck_core_queue_event()` for UI/controller sources |
 | `library/rekordbox_pdb` | ✅ **RUNNING ON HW** | PDB parser — title/artist/album/anlz_path + musical key (Keys table 0x05) from export.pdb |
 | `library/rekordbox_anlz` | ✅ **RUNNING ON HW** | ANLZ parser — BPM/beatgrid/waveform/cues; strict bounded section walk; host regression coverage |
-| `library` (USB) | ✅ **RUNNING ON HW** | `library_init()` transactionally publishes immutable track records from `/usb`; sort republishes only a compact double-buffered `uint16_t` row order; Library UI pages eight rows at a time instead of allocating up to 1024×5 LVGL cells; `library_get_summary()` is the copy accessor (`library_get_ptr()` is simulator-only) |
-| `usb_storage` | ✅ **RUNNING ON HW** | USB Host + MSC → `usb_media_mount` (FAT32/exFAT on superfloppy, MBR, or GPT) → `/usb`; callback reloads library + UI |
+| `library` (USB) | ✅ **RUNNING ON HW** | `library_init()` merges the `export.pdb` of every registered USB source into one immutable store (`library_source_set/clear`); `track_key = (source_slot<<28) \| base` so ids never collide across sticks and a stick keeps stable keys across the other stick's rebuild; `s_record_count` (all) vs `s_track_count` (filtered view via `library_set_source_filter`); `library_find_record_by_key()` is the unfiltered loader lookup; sort republishes a compact double-buffered `uint16_t` row order; Library UI pages eight rows at a time |
+| `usb_storage` | ✅ **RUNNING ON HW** | single USB Host (`usb_host_install()` in `usb_storage.c`, released `espressif/usb` + `usb_host_msc`) + MSC. `s_devs[USB_STORAGE_MAX_DEVICES=3]` mounts up to 3 sticks at once (slot 0 → `/usb`, slot i → `/usb<i+1>`) via `usb_media_mount` (FAT32/exFAT on superfloppy, MBR, or GPT). `usb_storage_event_cb_t` carries `{index, base_path, mounted}`; `media_io_gate` = "any stick mounted". Hubs supported (`CONFIG_USB_HOST_HUBS_SUPPORTED`, `CONFIG_FATFS_VOLUME_COUNT=4`) |
+| `media_catalog` | ✅ **RUNNING ON HW** | thin identity/generation shim over `library`; rows/loads carry `source_slot`; `media_catalog_set_source_filter()`; `media_catalog_load_by_identity()` re-checks generation at 4 points and builds the absolute path from `library_source_mount_path(slot)` |
 | `app_settings` | ✅ **RUNNING ON HW** | NVS persistence (audio output, backlight %, time mode, cue mode, master trim, `wifi_remote`); apply at boot |
-| `ui` | ✅ **RUNNING ON HW** | 4-screen 800×480 dual-deck UI (Overview/Library/Hot Cues/Settings); PPA rotation; touch indev; direct Controller USB1 connection state and P4-only firmware status |
-| `bsp_jc4880` | ✅ **RUNNING ON HW** | ST7701 display + GT911 touch + PCM5102A MAIN out (ES8311 dropped); SDMMC `/sd` mount hardware-verified (on-chip LDO ch4; `bsp_sd_init` retries the mount 3× to ride out cold-boot `send_op_cond` timeouts) |
-| `audio_engine` | ✅ **RUNNING ON HW** | MP3 (minimp3) + WAV + FLAC (dr_flac) → PCM5102A I2S MAIN + FLX4 USB headphone cue; fixed 8 × 32 KiB compressed-page cache per deck instead of whole-track PSRAM preload; pitch resampling; PVBR/estimated seek on decode task; loop (set/clear/get); dual-deck mixer/EQ/channel-filter/beat-FX (filter/echo/flanger/delay) + Smart CFX; FLANGER/DELAY and cache-miss hardware stress pending; RELAXED-atomic shared state (incl. lock-free deck VU peaks: raw `s_deck_peak` + decaying pre-fader `deck_peak_display`); `ae_fail_load()` aborts a stalled load; SDL2/WAV on PC |
+| `ui` | ✅ **RUNNING ON HW** | 4-screen 800×480 dual-deck UI (Overview/Library/Hot Cues/Settings); PPA rotation; touch indev; controller connection state and P4-only firmware status |
+| `bsp_jc4880` | ✅ **RUNNING ON HW** | ST7701 display + GT911 touch + dual PCM5102A (MAIN I2S1 `bsp_audio_get_main_i2s_tx`, CUE I2S0 `bsp_audio_get_cue_i2s_tx`; ES8311 is dev-only under `CONFIG_BSP_ES8311_MONITOR`); SDMMC `/sd` mount hardware-verified (on-chip LDO ch4; `bsp_sd_init` retries the mount 3× to ride out cold-boot `send_op_cond` timeouts) |
+| `audio_engine` | ✅ **RUNNING ON HW** | MP3 (minimp3) + WAV + FLAC (dr_flac) → PCM5102A I2S1 MAIN (paces the loop) + PCM5102A I2S0 CUE/headphones (`audio_output_write_cue`, non-fatal short timeout); fixed 8 × 32 KiB compressed-page cache per deck instead of whole-track PSRAM preload; pitch resampling; PVBR/estimated seek on decode task; loop (set/clear/get); dual-deck mixer/EQ/channel-filter/beat-FX (filter/echo/flanger/delay) + Smart CFX; FLANGER/DELAY and cache-miss hardware stress pending; RELAXED-atomic shared state (incl. lock-free deck VU peaks: raw `s_deck_peak` + decaying pre-fader `deck_peak_display`); `ae_fail_load()` aborts a stalled load; SDL2/WAV on PC |
 | `wifi_link` | ✅ **RUNNING ON HW** | ESP-Hosted (onboard ESP32-C6, SDIO) SoftAP `Pajoniiir`; Settings toggle (default off); `wifi_link_start/stop` + async `request_enable`; brings up `web_server`/`dns_server` |
 | `web_server` | ✅ **RUNNING ON HW** | httpd mobile controller at `http://192.168.4.1`; `/api/status` (dynamic JSON incl. `controller` object), `/api/library`, `/api/control` (play/cue/pfl/volume/crossfader/pitch/loop/seek), `/api/load`; captive DNS |
-| `controller_profile_manager` | ✅ **P4-LOCAL** | Scans `/sd/controllers/<name>/profile.s3bin`, validates VID/PID and activates the matching profile synchronously in the local controller runtime; no UART transfer task |
+| `controller_profile_manager` | ⚠️ **DORMANT** | Scans `/sd/controllers/<name>/profile.s3bin` and can activate a profile by USB VID/PID — but its only caller was the deleted USB connection path. On the UART link it never activates (no descriptor report). Restore needs a UART-side profile selector. Still `CONFIG_CONTROLLER_PROFILE_MANAGER`-gated |
 
 ---
 
@@ -164,9 +184,9 @@ idf.py build
 idf.py -p COM15 flash
 ```
 
-> **Sound is in the default build.** PCM5102A RCA MAIN and direct FLX4 USB
-> headphone audio are enabled in `sdkconfig.defaults`; no monitor PCM overlay or
-> S3 audio bridge is required.
+> **Sound is in the default build.** Both PCM5102A DACs — RCA MAIN on I2S1 and
+> CUE/headphones on I2S0 — come up from `sdkconfig.defaults`; no ES8311, no
+> monitor PCM overlay, no S3 audio bridge.
 
 `idf.py monitor` requires a TTY; for boot logs use pyserial capture
 (`serial.Serial('COM15',115200)` + DTR/RTS reset toggle). Keep only one
@@ -177,21 +197,23 @@ process active on COM15 (capture and flash are mutually exclusive — "Access is
 ## Architecture
 
 ```
-FLX4 on P4 USB1 → controller_runtime → local semantic queue → deck_core
-          ↑                                                     ↓
-          └──────── direct USB-MIDI LED sink ─────── audio_engine + UI
-                                                              ↓
-                                    PCM5102A MAIN + FLX4 UAC cue
+external MCU ─ MIDI 1.0 ─ UART ─▶ midi_uart_link ─▶ controller_runtime ─▶ semantic queue ─▶ deck_core
+                                       ▲                                                        │
+                                       └──── LED sink: FLX4 notes on UART TX ◀── control_link ◀─┤
+                                                                                          audio_engine + UI
+                                                                                                │
+                                                                          PCM5102A MAIN (I2S1) + PCM5102A CUE (I2S0)
 ```
 
 **Initialization sequence** (from `app_main.c`):
 1. `deck_core_init()` — creates ctrl_event_queue
-2. `control_link_init(queue)` — installs the local semantic queue adapter
-3. `bsp_display_init()` ✅ + `bsp_touch_init()` ✅ + `bsp_audio_init()` ✅ + `bsp_sd_init()` (`/sd`, non-fatal without card)
+2. `control_link_init(queue)` — installs the semantic queue adapter
+3. `bsp_display_init()` ✅ + `bsp_touch_init()` ✅ + `bsp_audio_init()` ✅ (both PCM5102A DACs) + `bsp_sd_init()` (`/sd`, non-fatal without card)
 4. `library_init()` — returns NOT_FOUND until USB is mounted (OK at boot)
-5. `audio_engine_init()` — starts PCM5102A and direct FLX4 UAC output paths
+5. `audio_engine_init()` — grabs both I2S TX handles (MAIN + CUE)
 6. `ui_init()` — LVGL 800×480, 4 screens, PPA rotation, touch indev
-7. `usb_storage_init(cb)` + `p4_local_controller_start()` — shared dual-root USB host
+7. `usb_storage_init(cb)` — single USB host + MSC
+8. `midi_uart_link_start()` — `controller_runtime_init()` + UART RX/dispatch tasks + LED sink
 
 > **Wi-Fi remote — user-toggled from Settings, default OFF (2026-07-04).**
 > The P4 has no native radio; the onboard **ESP32-C6** provides Wi-Fi over the
@@ -240,15 +262,18 @@ checksum = type ^ id ^ val_lo ^ val_hi ^ seq
 
 ---
 
-## Historical UART Pins (P4 side, JP1 header)
+## Serial-MIDI controller link pins (P4 side, JP1 header)
 
-| Signal | GPIO | Note |
-|--------|------|----------|
-| UART1 RX | **GPIO28** | receives from S3 GPIO40 TX (JP1 pin 19) |
-| UART1 TX | **GPIO29** | sends to S3 GPIO41 RX (JP1 pin 12) |
+| Signal | GPIO | JP1 pin | Note |
+|--------|------|---------|------|
+| UART1 RX | **GPIO28** | 19 | external MCU MIDI TX → P4 |
+| UART1 TX | **GPIO29** | 12 | P4 → external MCU (LED feedback: FLX4-shaped notes) |
+| GND | GND | 3 / 4 / 14 | shared |
+| VCC3V3 | — | 1 / 16 | optional 3.3 V for a small controller MCU |
 
-These pins belonged to the retired S3 wiring and are not required by the active
-P4-only product.
+Same pins the retired S3 link used. Configurable via `CONFIG_MIDI_UART_LINK_*`
+(port / RX / TX / baud). Default 19200 8N1. The bring-up test controller sketch
+(Circuit Playground Classic / bare ATmega32U4) is in `Atmega32u4_test/`.
 
 ---
 
@@ -256,7 +281,9 @@ P4-only product.
 
 ### Pioneer Hardware Database (`export.pdb`) ✅
 
-Implemented. `library_init()` calls `pdb_open("/usb/PIONEER/rekordbox/export.pdb")`.
+Implemented. `library_init()` opens `<mount>/PIONEER/rekordbox/export.pdb` for
+every registered USB source (`/usb`, `/usb2`, …) and merges the rows into one
+store. A stick with no `export.pdb` (plain FAT) just contributes nothing.
 
 ```c
 // PDB contains for each track:
@@ -295,9 +322,11 @@ Format details: `docs/rekordbox-format-analysis.md`
 
 ## Audio Engine (`audio_engine`) ✅ RUNNING ON HARDWARE
 
-minimp3/dr_flac/WAV decode + PCM5102A I2S MAIN output (firmware) / WAV (PC test).
-(ES8311 codec was dropped; MAIN out is PCM5102A on I2S_NUM_1, headphone cue is
-the FLX4 USB audio path.)
+minimp3/dr_flac/WAV decode → two PCM5102A DACs on firmware (WAV on PC test):
+MAIN on `I2S_NUM_1` (`bsp_audio_get_main_i2s_tx`, blocking write paces the loop)
+and CUE/headphones on `I2S_NUM_0` (`bsp_audio_get_cue_i2s_tx`,
+`audio_output_write_cue` with a short non-fatal timeout). ES8311 is compiled
+only under `CONFIG_BSP_ES8311_MONITOR` (dev boards).
 
 ```c
 // Typical usage:
@@ -321,17 +350,19 @@ audio_engine_deck_stop(deck);
 | (neither) | ESP32-P4 firmware | PCM5102A MAIN via `i2s_channel_write` (`CONFIG_BSP_PCM5102A_MAIN_OUT`) |
 
 **Firmware Path (running on HW):**
-- `bsp_audio_init()` sets up the PCM5102A I2S MAIN channel (I2S_NUM_1);
-  `audio_engine_init()` retrieves it via `bsp_audio_get_main_i2s_tx()` and writes
-  with `i2s_channel_write` (blocks on I2S DMA → real-time tempo).
+- `bsp_audio_init()` sets up both PCM5102A I2S channels (MAIN I2S_NUM_1, CUE
+  I2S_NUM_0); `audio_engine_init()` retrieves them via
+  `bsp_audio_get_main_i2s_tx()` / `bsp_audio_get_cue_i2s_tx()`. The MAIN
+  `i2s_channel_write` blocks on I2S DMA → real-time tempo; the CUE write is
+  best-effort (a stalled cue DAC must never block playback).
 - `audio_engine_deck_load()` does not read USB on the caller stack. A loader opens
   the source and binds a fixed **256 KiB compressed cache per deck** (8 × 32 KiB).
   MP3/WAV use cache `read-at`; FLAC uses `drflac_open` read/seek/tell callbacks.
   Every cache miss is serialized through `media_io_gate`, while the decoded PCM
   timeline supplies playback runway. Whole-track PSRAM allocation is not used.
 - minimp3 needs **~26 KB stack** → decode task is 32 KB (NOT on the LVGL/caller stack).
-- The output task pitch-resamples/mixes the ring buffer and writes MAIN via `i2s_channel_write()` (blocks on I2S DMA → real-time tempo); headphone cue goes out over the FLX4 USB audio path.
-- The PCM5102A I2S clock opens at the sample rate of the first frame (44.1/48k both observed).
+- The output task pitch-resamples/mixes the ring buffer, writes MAIN via `i2s_channel_write()` (blocks on I2S DMA → real-time tempo) and writes the cue/headphone mix to the second PCM5102A via `audio_output_write_cue()` (short timeout, never fatal).
+- Both PCM5102A I2S clocks open at the sample rate of the first frame and are realigned per track in `audio_output_service_open_codec()` (44.1/48k both observed).
 - **Control flows through `deck_core`**: UI "LOAD TRACK" → `audio_engine_deck_load`; touch PLAY/CUE/loop/
   hot-cue/beat-jump → `deck_core`/`audio_engine`. `audio_engine_deck_seek()` only sets
   `seek_target_ms` — the actual seek (PVBR O(1) or linear) is handled by the **decode task** (32 KB stack).
@@ -557,7 +588,7 @@ non-PSRAM address fails ("invalid addr"), DSI hangs. (Now we write directly to F
 
 ### Touch (GT911) ✅ WORKS
 - GT911 on **shared I2C bus** (I2C_NUM_1, SDA=GPIO7, SCL=GPIO8), addr 0x5D, reset/INT = NC.
-  The ES8311 path is disabled in product defaults; MAIN audio uses PCM5102A and cue audio uses the FLX4 USB path. `bsp_get_i2c_bus()` remains the shared board I2C accessor.
+  The ES8311 path is disabled in product defaults; MAIN and CUE audio each use their own PCM5102A. `bsp_get_i2c_bus()` remains the shared board I2C accessor.
 - Coordinate transform for our 90° rotation: **swap_xy=1, mirror_x=1** (x_max=480, y_max=800 native).
   Taps map accurately (verified). Values from vendor demo ROTATION_90.
 - `ui_lvgl_backend.c` registers the LVGL pointer indev which polls `esp_lcd_touch_get_coordinates()`.
@@ -590,13 +621,16 @@ default 3.5 KB overflows (stack-protection panic).
 | Touch I2C SDA/SCL | GPIO7/8 (shared with codec) |
 | Codec I2C addr | 0x18 |
 | Touch I2C addr | 0x5D |
-| I2S MCLK/BCLK/LRCK | GPIO13/12/10 |
-| I2S DIN/DOUT | GPIO48/9 |
-| Speaker PA | GPIO11 |
+| ES8311 I2S MCLK/BCLK/LRCK (dev only) | GPIO13/12/10 |
+| ES8311 I2S DIN/DOUT (dev only) | GPIO48/9 |
+| Speaker PA (retired) | GPIO11 |
+| PCM5102A MAIN BCLK/WS/DOUT (I2S1) | GPIO50/52/51 |
+| PCM5102A CUE BCLK/WS/DOUT (I2S0) | GPIO32/34/35 |
+| Serial-MIDI link RX/TX (UART1) | GPIO28/29 |
 | SDMMC D0-D3/CMD/CLK | GPIO39–42/44/43 |
-| JP1 Free GPIOs | GPIO28–35, GPIO49–52 |
+| JP1 free GPIOs (after DAC + MIDI link) | GPIO30/31/33, GPIO49 |
 
-**Do not use**: GPIO5/7/8/9/10/11/12/13/23/39–44/48
+**Do not use**: GPIO5/7/8/9/10/11/12/13/23/32/34/35/39–44/48/50/51/52; GPIO28/29 belong to the serial-MIDI link.
 
 ---
 
@@ -640,3 +674,5 @@ dual-board design. They are not active P4 wiring or release requirements.
 - ✅ ~~Jog does nothing while playing~~ — fixed 2026-07-10: a jog while playing now does a transient pitch-bend **nudge** for manual beat matching (`audio_engine_deck_jog_nudge` bumps a per-deck `s_jog_bend`; the output task applies `pitch_factor × (1+bend)` and decays it back). Both the platter (`JOG_SCRATCH`) and the ring (`JOG_BEND`) nudge while playing; both scrub the position while paused. The Overview waveform tracks the bend because the mixer snapshot now carries `effective_speed_permille` (fader × bend), fed into the position interpolator instead of the fader-only speed.
 - ✅ **Line-out (RCA) validation** — PCM5102A MAIN RCA and onboard 3.5 mm output accepted on hardware 2026-06-30; ES8311 is not the product path
 - ✅ **True scratch / "vinyl mode"** — implemented and hardware-validated 2026-07-11. `JOG_TOUCH` gates platter-top scratch from side-ring bend; a per-deck canonical PSRAM PCM timeline provides retained history plus forward lookahead, bidirectional interpolated playback, click-free release/re-grab, paused/CUE scratch, active-loop wrapping, waveform-head tracking and deferred pitch handoff. Dual-deck stress passed without WDT or monitor PCM drops. **Detailed design and validation record: [`docs/VINYL_SCRATCH_PLAN.md`](../../docs/VINYL_SCRATCH_PLAN.md).**
+- 🔧 **Dual-USB-host feature removed (2026-09-09, `refactor/p4-single-usb-host`)** — the forked/patched `esp-usb`, `usb_host_manager`, `controller_usb_host`, `controller_usb_audio` and `p4_local_controller` are deleted. `usb_storage.c` owns a single `usb_host_install()` on released `espressif/usb 1.5.0` + `usb_host_msc 1.2.0`; this restores serial monitoring, DFU-free flashing and external hub enumeration. Controller input now comes in as a raw MIDI 1.0 byte stream on a UART via `midi_uart_link` (which owns `controller_runtime`); a USB-only controller like the DDJ-FLX4 needs an external USB-MIDI-host bridge MCU ahead of the UART. CUE/headphone audio moved from the FLX4 UAC stream to a **second PCM5102A on I2S0** (GPIO32/34/35). **Pending hardware acceptance:** UART controller round-trip (PFL + LED echo), CUE DAC audio, flash-without-DFU, monitor, USB stick behind a hub. Software: `idf.py build` + `.\tests\run_p4_host_tests.ps1` green.
+- 🔧 **Dual USB stick support (2026-09-09, same branch, on top of the above)** — up to 3 sticks mount at once (`/usb`, `/usb2`, …) and feed **one merged library**. `track_key` is source-slot-salted so ids never collide; a deck playing from stick A keeps playing when stick B is inserted or removed (`deck_core_clear_loaded_tracks_for_source` clears only decks on the removed slot and does not raise the global `media_floor`). Library screen has an `ALL/A/B/C/D` filter (buttonmatrix) and a one-letter origin badge per row; `/api/library` streams `"source"`. **Pending hardware acceptance:** two Rekordbox sticks on a hub → merged list, per-stick loads, hot-plug keeps the other deck playing. Software green.
